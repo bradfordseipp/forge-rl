@@ -27,7 +27,7 @@ public class ObservationConverter {
     private static final int MAX_STACK = 10;
     private static final int MAX_ACTIONS = 256;
     private static final int NUM_DECISION_TYPES = 15;
-    private static final int ACTION_FEATURES = 7;
+    private static final int ACTION_FEATURES = 20;
 
     public float[] gameInfo(Observation obs) {
         GameInfo gi = obs.getGameInfo();
@@ -136,13 +136,27 @@ public class ObservationConverter {
             float isPass = (srcNameId == 0 && srcCardId == 0) ? 1f : 0f;
 
             int base = idx * ACTION_FEATURES;
-            mat[base]     = srcNameId;  // raw int, embedded in model
-            mat[base + 1] = (float) Math.log1p(srcCardId);
-            mat[base + 2] = isPass;
-            mat[base + 3] = action.getTargetIsPlayer() ? 1f : 0f;
-            mat[base + 4] = action.getTargetNameId();  // raw int, embedded in model
-            mat[base + 5] = (float) Math.log1p(action.getTargetCardId());
-            mat[base + 6] = action.getTargetIsOwn() ? 1f : 0f;
+            mat[base]      = srcNameId;  // raw int, embedded in model
+            mat[base + 1]  = (float) Math.log1p(srcCardId);
+            mat[base + 2]  = isPass;
+            mat[base + 3]  = action.getTargetIsPlayer() ? 1f : 0f;
+            mat[base + 4]  = action.getTargetNameId();  // raw int, embedded in model
+            mat[base + 5]  = (float) Math.log1p(action.getTargetCardId());
+            mat[base + 6]  = action.getTargetIsOwn() ? 1f : 0f;
+            mat[base + 7]  = action.getSourcePower() / 20f;
+            mat[base + 8]  = action.getSourceToughness() / 20f;
+            mat[base + 9]  = action.getSourceCmc() / 10f;
+            mat[base + 10] = action.getCostTapsSelf() ? 1f : 0f;
+            mat[base + 11] = action.getCostSacrifices() ? 1f : 0f;
+            mat[base + 12] = action.getCostPaysLife() ? 1f : 0f;
+            mat[base + 13] = action.getCostExilesFromGraveyard() ? 1f : 0f;
+            mat[base + 14] = action.getCanTargetCreatures() ? 1f : 0f;
+            mat[base + 15] = action.getCanTargetPlayers() ? 1f : 0f;
+            mat[base + 16] = action.getDamageAmount() / 20f;
+            int typeBm = action.getSourceTypeBitmask();
+            mat[base + 17] = (typeBm & 1) != 0 ? 1f : 0f;       // creature
+            mat[base + 18] = (typeBm & 2) != 0 ? 1f : 0f;       // land
+            mat[base + 19] = (typeBm & 0xC) != 0 ? 1f : 0f;     // instant or sorcery
         }
         return mat;
     }

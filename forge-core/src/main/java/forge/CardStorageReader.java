@@ -182,6 +182,11 @@ public class CardStorageReader {
     }
     
     private File findFileForCard(String transformedName) {
+        // Token scripts use flat directory structure (no first-letter subdirs)
+        if (loadingTokens) {
+            File file = new File(cardsfolder, transformedName + CARD_FILE_DOT_EXTENSION);
+            return file.exists() ? file : null;
+        }
         String folder = cardsfolder.getAbsolutePath() + "/" + transformedName.charAt(0);
         File file = new File(folder + "/" + transformedName + CardStorageReader.CARD_FILE_DOT_EXTENSION);
         if (!file.exists()) {

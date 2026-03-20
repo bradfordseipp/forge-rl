@@ -179,6 +179,26 @@ message ActionOption {
     int32 target_name_id = 7;
     bool target_is_own = 8;    // true if target belongs to the acting player
     bool target_is_player = 9; // true if target is a player (not a card)
+
+    // Source card mechanical properties
+    int32 source_power = 10;
+    int32 source_toughness = 11;
+    int32 source_cmc = 12;
+    int32 source_type_bitmask = 13;    // same encoding as CardState.type_bitmask
+    int32 source_keyword_bitmask = 14; // same encoding as CardState.keyword_bitmask
+
+    // Cost components (what does this action cost beyond mana?)
+    bool cost_taps_self = 15;
+    bool cost_sacrifices = 16;
+    bool cost_pays_life = 17;
+    bool cost_exiles_from_graveyard = 18;
+
+    // Target restriction metadata (what CAN this ability target?)
+    bool can_target_creatures = 19;
+    bool can_target_players = 20;
+
+    // Effect metadata
+    int32 damage_amount = 21;
 }
 
 // ─── Game Result ────────────────────────────────────────────

@@ -60,6 +60,7 @@ class Args:
     opponent_model: str = ""
     swap_decks: bool = False
     no_reward_shaping: bool = False
+    resume: str = ""
 
     @property
     def batch_size(self) -> int:
@@ -151,8 +152,8 @@ class Agent(nn.Module):
         )
 
         # Action encoder: per-action features → embedding
-        # Input: 2 * CARD_EMBED_DIM (source + target name embeddings) + 5 (other features)
-        action_input_dim = 2 * CARD_EMBED_DIM + 5
+        # Input: 2 * CARD_EMBED_DIM (source + target name embeddings) + 18 (other features)
+        action_input_dim = 2 * CARD_EMBED_DIM + 18
         self.action_encoder = nn.Sequential(
             layer_init(nn.Linear(action_input_dim, 32)),
             nn.ReLU(),
@@ -230,7 +231,7 @@ class Agent(nn.Module):
     def _encode_actions(self, action_features: torch.Tensor) -> torch.Tensor:
         """Encode action features with shared card name embeddings.
 
-        action_features: (B, 256, 7) where indices 0 and 4 are raw name_ids.
+        action_features: (B, 256, 20) where indices 0 and 4 are raw name_ids.
         Returns: (B, 256, 32) encoded actions.
         """
         af = action_features.float()
@@ -240,11 +241,11 @@ class Agent(nn.Module):
         src_emb = self.card_name_embedding(src_name_ids)  # (B, 256, CARD_EMBED_DIM)
         tgt_emb = self.card_name_embedding(tgt_name_ids)  # (B, 256, CARD_EMBED_DIM)
 
-        # Other features: indices 1,2,3,5,6 (5 features)
-        other = torch.cat([af[:, :, 1:4], af[:, :, 5:7]], dim=-1)  # (B, 256, 5)
+        # Other features: indices 1,2,3 + 5,6 + 7..19 (18 features)
+        other = torch.cat([af[:, :, 1:4], af[:, :, 5:7], af[:, :, 7:20]], dim=-1)  # (B, 256, 18)
 
         # Concatenate: src_emb + other + tgt_emb
-        combined = torch.cat([src_emb, other, tgt_emb], dim=-1)  # (B, 256, 21)
+        combined = torch.cat([src_emb, other, tgt_emb], dim=-1)  # (B, 256, 34)
         return self.action_encoder(combined)  # (B, 256, 32)
 
     def get_action_and_value(
@@ -359,11 +360,15 @@ def start_servers(
     classpath = _build_classpath(server_dir)
     procs = []
 
-    # Resolve deck paths to absolute so they work from server_dir cwd
+    # Resolve deck paths to absolute — deck paths are relative to server_dir
+    # (e.g. src/main/resources/decks/mono_red.dck is under forge-research/)
     abs_deck_paths = []
     if deck_paths:
         for dp in deck_paths:
-            abs_deck_paths.append(str(Path(dp).resolve()))
+            p = Path(dp)
+            if not p.is_absolute():
+                p = Path(server_dir) / dp
+            abs_deck_paths.append(str(p.resolve()))
 
     # Set up log directory
     log_files = []
@@ -441,7 +446,7 @@ class RewardShaping(gym.Wrapper):
     - Terminal +1/-1 from the base env is preserved unchanged.
     """
 
-    LIFE_SCALE = 0.05    # per opponent life point lost
+    LIFE_SCALE = 0.005   # per opponent life point lost
     BOARD_SCALE = 0.01   # per creature per turn (applied once when turn changes)
 
     def __init__(self, env: gym.Env):
@@ -537,6 +542,8 @@ def parse_args() -> Args:
                         help="Agent plays deck B instead of A (player index 1)")
     parser.add_argument("--no-reward-shaping", action="store_true", default=False,
                         help="Disable intermediate reward shaping (pure win/loss)")
+    parser.add_argument("--resume", type=str, default="",
+                        help="Path to checkpoint .pt file to resume training from")
     parsed = parser.parse_args()
     return Args(**vars(parsed))
 
@@ -607,6 +614,26 @@ def main():
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
     print(f"Agent parameters: {sum(p.numel() for p in agent.parameters()):,}")
 
+    # Resume from checkpoint
+    start_update = 1
+    resume_global_step = 0
+    resume_episode_count = 0
+    resume_win_count = 0
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+            agent.load_state_dict(ckpt["model_state_dict"])
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            start_update = ckpt["update"] + 1
+            resume_global_step = ckpt["global_step"]
+            resume_episode_count = ckpt["episode_count"]
+            resume_win_count = ckpt["win_count"]
+            print(f"Resumed from {args.resume} (update {ckpt['update']}, step {resume_global_step:,})")
+        else:
+            # Legacy checkpoint (just state_dict)
+            agent.load_state_dict(ckpt if isinstance(ckpt, dict) else ckpt)
+            print(f"Loaded weights from {args.resume} (legacy format, starting from update 1)")
+
     # Rollout storage (numpy dicts for obs, tensors for the rest)
     obs_buf = {
         key: np.zeros((args.num_steps, args.num_envs) + envs.single_observation_space[key].shape,
@@ -624,10 +651,11 @@ def main():
     next_done = torch.zeros(args.num_envs, device=device)
 
     # Tracking
-    global_step = 0
-    episode_count = 0
-    win_count = 0
+    global_step = resume_global_step
+    episode_count = resume_episode_count
+    win_count = resume_win_count
     recent_returns = []
+    recent_wins = []  # 1/0 per game, independent of reward shaping
     recent_turns = []
     recent_agent_life = []
     recent_opp_life = []
@@ -639,7 +667,7 @@ def main():
     print(f"Starting training: {num_updates} updates, {args.batch_size} batch size")
     start_time = time.time()
 
-    for update in range(1, num_updates + 1):
+    for update in range(start_update, num_updates + 1):
         # Anneal learning rate
         if args.anneal_lr:
             frac = 1.0 - (update - 1) / num_updates
@@ -694,8 +722,15 @@ def main():
                         ep_length = int(infos["episode"]["l"][i])
                         episode_count += 1
                         recent_returns.append(ep_return)
-                        if ep_return > 0:
+                        # Determine win from game_result if available, else from opp life
+                        won = False
+                        if "game_result" in infos and infos.get("_game_result", np.zeros(args.num_envs, dtype=bool))[i]:
+                            won = int(infos["game_result"]["winner_index"][i]) == 0
+                        else:
+                            won = float(next_obs["opponent_scalars"][i][0]) <= 0
+                        if won:
                             win_count += 1
+                        recent_wins.append(1 if won else 0)
 
                         writer.add_scalar("charts/episodic_return", ep_return, global_step)
                         writer.add_scalar("charts/episodic_length", ep_length, global_step)
@@ -801,6 +836,8 @@ def main():
         # Smoothed game metrics (last 100 episodes)
         if recent_returns:
             writer.add_scalar("charts/avg_return_100", np.mean(recent_returns[-100:]), global_step)
+        if recent_wins:
+            writer.add_scalar("charts/win_rate_1000", np.mean(recent_wins[-1000:]), global_step)
         if recent_turns:
             writer.add_scalar("charts/avg_turns_per_game_100", np.mean(recent_turns[-100:]), global_step)
         if recent_agent_life:
@@ -814,12 +851,13 @@ def main():
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
 
-        # Decision type frequency
+        # Decision type frequency (only log types that actually fire)
         total_decisions = sum(decision_type_counts.values()) or 1
         for dt_idx, name in enumerate(DECISION_TYPE_NAMES):
             count = decision_type_counts.get(dt_idx, 0)
-            writer.add_scalar(f"decisions/count_{name}", count, global_step)
-            writer.add_scalar(f"decisions/frac_{name}", count / total_decisions, global_step)
+            if count > 0:
+                writer.add_scalar(f"decisions/count_{name}", count, global_step)
+                writer.add_scalar(f"decisions/frac_{name}", count / total_decisions, global_step)
 
         # Mulligan quality metrics
         if mulligan_events:
@@ -867,12 +905,26 @@ def main():
         # Periodic checkpoint every 50 updates
         if update % 50 == 0:
             ckpt_path = f"runs/{args.run_name}/agent.pt"
-            torch.save(agent.state_dict(), ckpt_path)
+            torch.save({
+                "model_state_dict": agent.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "global_step": global_step,
+                "update": update,
+                "episode_count": episode_count,
+                "win_count": win_count,
+            }, ckpt_path)
             print(f"  Checkpoint saved to {ckpt_path} (update {update})")
 
     # Save final model
     model_path = f"runs/{args.run_name}/agent.pt"
-    torch.save(agent.state_dict(), model_path)
+    torch.save({
+        "model_state_dict": agent.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "global_step": global_step,
+        "update": update,
+        "episode_count": episode_count,
+        "win_count": win_count,
+    }, model_path)
     print(f"Model saved to {model_path}")
 
     envs.close()

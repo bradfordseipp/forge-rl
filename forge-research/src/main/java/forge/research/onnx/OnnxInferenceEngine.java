@@ -19,16 +19,16 @@ public class OnnxInferenceEngine implements AutoCloseable {
         "game_info",            // (1, 6)
         "agent_scalars",        // (1, 11)
         "opponent_scalars",     // (1, 11)
-        "agent_hand",           // (1, 10, 16)
-        "agent_battlefield",    // (1, 20, 16)
-        "opponent_battlefield", // (1, 20, 16)
-        "agent_graveyard",      // (1, 15, 16)
-        "opponent_graveyard",   // (1, 15, 16)
-        "agent_exile",          // (1, 10, 16)
-        "opponent_exile",       // (1, 10, 16)
+        "agent_hand",           // (1, 10, 38)
+        "agent_battlefield",    // (1, 20, 38)
+        "opponent_battlefield", // (1, 20, 38)
+        "agent_graveyard",      // (1, 15, 38)
+        "opponent_graveyard",   // (1, 15, 38)
+        "agent_exile",          // (1, 10, 38)
+        "opponent_exile",       // (1, 10, 38)
         "stack",                // (1, 10, 8)
         "decision_type",        // (1, 15)
-        "action_features",      // (1, 256, 7)
+        "action_features",      // (1, 256, 20)
     };
 
     // Shapes for 2D inputs (rows, cols) — 1D inputs have cols only
@@ -36,16 +36,16 @@ public class OnnxInferenceEngine implements AutoCloseable {
         null,           // game_info: 1D, 6
         null,           // agent_scalars: 1D, 11
         null,           // opponent_scalars: 1D, 11
-        {10, 16},       // agent_hand
-        {20, 16},       // agent_battlefield
-        {20, 16},       // opponent_battlefield
-        {15, 16},       // agent_graveyard
-        {15, 16},       // opponent_graveyard
-        {10, 16},       // agent_exile
-        {10, 16},       // opponent_exile
+        {10, 38},       // agent_hand
+        {20, 38},       // agent_battlefield
+        {20, 38},       // opponent_battlefield
+        {15, 38},       // agent_graveyard
+        {15, 38},       // opponent_graveyard
+        {10, 38},       // agent_exile
+        {10, 38},       // opponent_exile
         {10, 8},        // stack
         null,           // decision_type: 1D, 15
-        {256, 7},       // action_features
+        {256, 20},      // action_features
     };
 
     private final OrtEnvironment env;
