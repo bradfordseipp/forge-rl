@@ -161,19 +161,9 @@ public class ObservationBuilder {
         }
 
         // Types (string list + bitmask)
-        int typeBitmask = 0;
+        int typeBitmask = computeTypeBitmask(c);
         for (forge.card.CardType.CoreType ct : c.getType().getCoreTypes()) {
             cs.addTypes(ct.name());
-            switch (ct) {
-                case Creature:    typeBitmask |= (1 << 0); break;
-                case Land:        typeBitmask |= (1 << 1); break;
-                case Instant:     typeBitmask |= (1 << 2); break;
-                case Sorcery:     typeBitmask |= (1 << 3); break;
-                case Enchantment: typeBitmask |= (1 << 4); break;
-                case Artifact:    typeBitmask |= (1 << 5); break;
-                case Planeswalker:typeBitmask |= (1 << 6); break;
-                default: break;
-            }
         }
         cs.setTypeBitmask(typeBitmask);
         for (String st : c.getType().getSubtypes()) {
@@ -181,26 +171,7 @@ public class ObservationBuilder {
         }
 
         // Keyword bitmask (using Keyword enum names)
-        int keywordBitmask = 0;
-        for (KeywordInterface kw : keywords) {
-            switch (kw.getKeyword()) {
-                case FLYING:         keywordBitmask |= (1 << 0); break;
-                case FIRST_STRIKE:   keywordBitmask |= (1 << 1); break;
-                case DOUBLE_STRIKE:  keywordBitmask |= (1 << 2); break;
-                case DEATHTOUCH:     keywordBitmask |= (1 << 3); break;
-                case LIFELINK:       keywordBitmask |= (1 << 4); break;
-                case TRAMPLE:        keywordBitmask |= (1 << 5); break;
-                case HASTE:          keywordBitmask |= (1 << 6); break;
-                case REACH:          keywordBitmask |= (1 << 7); break;
-                case VIGILANCE:      keywordBitmask |= (1 << 8); break;
-                case MENACE:         keywordBitmask |= (1 << 9); break;
-                case DEFENDER:       keywordBitmask |= (1 << 10); break;
-                case HEXPROOF:       keywordBitmask |= (1 << 11); break;
-                case INDESTRUCTIBLE: keywordBitmask |= (1 << 12); break;
-                case FLASH:          keywordBitmask |= (1 << 13); break;
-                default: break;
-            }
-        }
+        int keywordBitmask = computeKeywordBitmask(c);
         cs.setKeywordBitmask(keywordBitmask);
 
         // +1/+1 counters specifically
@@ -254,5 +225,46 @@ public class ObservationBuilder {
             return -1;
         }
         return phase.ordinal();
+    }
+
+    public static int computeTypeBitmask(Card c) {
+        int bitmask = 0;
+        for (forge.card.CardType.CoreType ct : c.getType().getCoreTypes()) {
+            switch (ct) {
+                case Creature:    bitmask |= (1 << 0); break;
+                case Land:        bitmask |= (1 << 1); break;
+                case Instant:     bitmask |= (1 << 2); break;
+                case Sorcery:     bitmask |= (1 << 3); break;
+                case Enchantment: bitmask |= (1 << 4); break;
+                case Artifact:    bitmask |= (1 << 5); break;
+                case Planeswalker:bitmask |= (1 << 6); break;
+                default: break;
+            }
+        }
+        return bitmask;
+    }
+
+    public static int computeKeywordBitmask(Card c) {
+        int bitmask = 0;
+        for (KeywordInterface kw : c.getKeywords()) {
+            switch (kw.getKeyword()) {
+                case FLYING:         bitmask |= (1 << 0); break;
+                case FIRST_STRIKE:   bitmask |= (1 << 1); break;
+                case DOUBLE_STRIKE:  bitmask |= (1 << 2); break;
+                case DEATHTOUCH:     bitmask |= (1 << 3); break;
+                case LIFELINK:       bitmask |= (1 << 4); break;
+                case TRAMPLE:        bitmask |= (1 << 5); break;
+                case HASTE:          bitmask |= (1 << 6); break;
+                case REACH:          bitmask |= (1 << 7); break;
+                case VIGILANCE:      bitmask |= (1 << 8); break;
+                case MENACE:         bitmask |= (1 << 9); break;
+                case DEFENDER:       bitmask |= (1 << 10); break;
+                case HEXPROOF:       bitmask |= (1 << 11); break;
+                case INDESTRUCTIBLE: bitmask |= (1 << 12); break;
+                case FLASH:          bitmask |= (1 << 13); break;
+                default: break;
+            }
+        }
+        return bitmask;
     }
 }

@@ -863,15 +863,8 @@ public class ComputerUtilMana {
                 // subtract mana from mana pool
                 manapool.payManaFromAbility(sa, cost, saPayment);
 
-                // need to consider if another use is now prevented
-                if (!cost.isPaid() && saPayment.isActivatedAbility() && !saPayment.getRestrictions().canPlay(saPayment.getHostCard(), saPayment)) {
-                    sourcesForShards.values().removeIf(s -> s == saPayment);
-                }
-
-                if (hasConverge) {
-                    // hack to prevent converge re-using sources
-                    sourcesForShards.values().removeIf(CardTraitPredicates.isHostCard(saPayment.getHostCard()));
-                }
+                // remove all mana abilities from this card to prevent re-tapping
+                sourcesForShards.values().removeIf(CardTraitPredicates.isHostCard(saPayment.getHostCard()));
             }
         }
 

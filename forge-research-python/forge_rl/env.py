@@ -25,7 +25,7 @@ CARD_FEATURES = 38
 STACK_FEATURES = 8
 MAX_ACTIONS = 256
 NUM_DECISION_TYPES = 15
-ACTION_FEATURES = 7
+ACTION_FEATURES = 20
 
 # Card feature layout (after bitmask unpacking):
 #  0: name_id, 1: power, 2: toughness, 3: cmc,
@@ -185,9 +185,16 @@ class ForgeRlEnv(gym.Env):
                 decision_type[dt] = 1
         result["decision_type"] = decision_type
 
-        # Per-action features: [source_name_id, log_card_id, is_pass,
-        #   target_is_player, target_name_id, log_target_card_id, target_is_own]
-        # source_name_id and target_name_id are raw ints (embedded in the model).
+        # Per-action features (20 total):
+        #   0: source_name_id (embedded), 1: log_card_id, 2: is_pass,
+        #   3: target_is_player, 4: target_name_id (embedded), 5: log_target_card_id,
+        #   6: target_is_own,
+        #   7: source_power/20, 8: source_toughness/20, 9: source_cmc/10,
+        #   10: cost_taps_self, 11: cost_sacrifices, 12: cost_pays_life,
+        #   13: cost_exiles_from_graveyard,
+        #   14: can_target_creatures, 15: can_target_players,
+        #   16: damage_amount/20,
+        #   17: source_is_creature, 18: source_is_land, 19: source_is_instant_or_sorcery
         action_features = np.full((MAX_ACTIONS, ACTION_FEATURES), -1, dtype=np.float32)
         if decision_point and decision_point.legal_actions:
             for action in decision_point.legal_actions:
@@ -196,6 +203,7 @@ class ForgeRlEnv(gym.Env):
                     src_name_id = action.source_name_id
                     src_card_id = action.source_card_id
                     is_pass = 1.0 if (src_name_id == 0 and src_card_id == 0) else 0.0
+                    type_bm = action.source_type_bitmask
                     action_features[idx] = [
                         float(src_name_id),
                         np.log1p(src_card_id),
@@ -204,6 +212,19 @@ class ForgeRlEnv(gym.Env):
                         float(action.target_name_id),
                         np.log1p(action.target_card_id),
                         1.0 if action.target_is_own else 0.0,
+                        action.source_power / 20.0,
+                        action.source_toughness / 20.0,
+                        action.source_cmc / 10.0,
+                        1.0 if action.cost_taps_self else 0.0,
+                        1.0 if action.cost_sacrifices else 0.0,
+                        1.0 if action.cost_pays_life else 0.0,
+                        1.0 if action.cost_exiles_from_graveyard else 0.0,
+                        1.0 if action.can_target_creatures else 0.0,
+                        1.0 if action.can_target_players else 0.0,
+                        action.damage_amount / 20.0,
+                        1.0 if (type_bm & 1) else 0.0,       # creature
+                        1.0 if (type_bm & 2) else 0.0,       # land
+                        1.0 if (type_bm & 0xC) else 0.0,     # instant or sorcery
                     ]
         result["action_features"] = action_features
 

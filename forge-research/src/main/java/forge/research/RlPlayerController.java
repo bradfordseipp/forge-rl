@@ -12,6 +12,7 @@ import org.apache.commons.lang3.tuple.ImmutablePair;
 
 import forge.LobbyPlayer;
 import forge.ai.ComputerUtilAbility;
+import forge.ai.ComputerUtilMana;
 import forge.ai.PlayerControllerAi;
 import forge.card.ColorSet;
 import forge.card.MagicColor;
@@ -88,6 +89,12 @@ public class RlPlayerController extends PlayerControllerAi {
      * Subclasses can override to provide alternative inference (e.g., ONNX).
      */
     protected int queryAgent(DecisionPoint decisionPoint) {
+        // Auto-resolve when there's only one legal action — skip the gRPC round-trip
+        // and neural network forward pass entirely
+        if (decisionPoint.getLegalActionsCount() == 1) {
+            return 0;
+        }
+
         try {
             Game game = getGame();
             Player opponent = null;
@@ -134,11 +141,16 @@ public class RlPlayerController extends PlayerControllerAi {
     }
 
     private ActionOption buildAction(int index, String description, Card source) {
-        return buildAction(index, description, source, null, false);
+        return buildAction(index, description, source, null, false, null);
     }
 
     private ActionOption buildAction(int index, String description, Card source,
             GameEntity target, boolean targetIsOwn) {
+        return buildAction(index, description, source, target, targetIsOwn, null);
+    }
+
+    private ActionOption buildAction(int index, String description, Card source,
+            GameEntity target, boolean targetIsOwn, SpellAbility sa) {
         ActionOption.Builder opt = ActionOption.newBuilder()
                 .setIndex(index)
                 .setDescription(description != null ? description : "");
@@ -146,6 +158,11 @@ public class RlPlayerController extends PlayerControllerAi {
             opt.setSourceCardId(source.getId());
             opt.setSourceCardName(source.getName());
             opt.setSourceNameId(cardRegistry.getNameId(source.getName()));
+            opt.setSourcePower(source.getNetPower());
+            opt.setSourceToughness(source.getNetToughness());
+            opt.setSourceCmc(source.getCMC());
+            opt.setSourceTypeBitmask(ObservationBuilder.computeTypeBitmask(source));
+            opt.setSourceKeywordBitmask(ObservationBuilder.computeKeywordBitmask(source));
         }
         if (target != null) {
             if (target instanceof Card) {
@@ -156,7 +173,61 @@ public class RlPlayerController extends PlayerControllerAi {
             opt.setTargetIsOwn(targetIsOwn);
             opt.setTargetIsPlayer(target instanceof Player);
         }
+        // SpellAbility-derived features
+        if (sa != null) {
+            enrichFromSpellAbility(opt, sa);
+        }
         return opt.build();
+    }
+
+    private void enrichFromSpellAbility(ActionOption.Builder opt, SpellAbility sa) {
+        // Cost components
+        if (sa.getPayCosts() != null) {
+            forge.game.cost.Cost cost = sa.getPayCosts();
+            opt.setCostTapsSelf(cost.hasTapCost());
+            opt.setCostSacrifices(cost.hasSpecificCostType(forge.game.cost.CostSacrifice.class));
+            opt.setCostPaysLife(cost.hasSpecificCostType(forge.game.cost.CostPayLife.class));
+            // Check for exile-from-graveyard cost (e.g. flashback)
+            forge.game.cost.CostExile exileCost = cost.getCostPartByType(forge.game.cost.CostExile.class);
+            opt.setCostExilesFromGraveyard(exileCost != null
+                    && exileCost.getFrom() != null
+                    && exileCost.getFrom().contains(ZoneType.Graveyard));
+        }
+
+        // Target restrictions
+        if (sa.usesTargeting()) {
+            TargetRestrictions tr = sa.getTargetRestrictions();
+            if (tr != null) {
+                opt.setCanTargetCreatures(tr.canTgtCreature());
+                opt.setCanTargetPlayers(tr.canTgtPlayer());
+            }
+        }
+
+        // Damage amount — walk ability chain looking for DealDamage/DamageAll
+        int dmg = extractDamageAmount(sa);
+        if (dmg > 0) {
+            opt.setDamageAmount(dmg);
+        }
+    }
+
+    private int extractDamageAmount(SpellAbility sa) {
+        SpellAbility cur = sa;
+        while (cur != null) {
+            if (cur.getApi() == forge.game.ability.ApiType.DealDamage
+                    || cur.getApi() == forge.game.ability.ApiType.DamageAll) {
+                String numDmg = cur.getParam("NumDmg");
+                if (numDmg != null) {
+                    try {
+                        return Integer.parseInt(numDmg);
+                    } catch (NumberFormatException e) {
+                        // Variable damage (X, etc.) — return 0
+                        return 0;
+                    }
+                }
+            }
+            cur = cur.getSubAbility();
+        }
+        return 0;
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -172,10 +243,40 @@ public class RlPlayerController extends PlayerControllerAi {
         }
 
         CardCollectionView cards = ComputerUtilAbility.getAvailableCards(getGame(), player);
-        List<SpellAbility> playable = ComputerUtilAbility.getSpellAbilities(cards, player);
+        // Use removeUnplayable=true so canPlay() filtering happens in the same pass
+        // as ability collection (avoids redundant iteration). This handles summoning
+        // sickness, zone restrictions, and other playability checks in one shot.
+        List<SpellAbility> playable = new java.util.ArrayList<>();
+        for (Card c : cards) {
+            playable.addAll(c.getAllPossibleAbilities(player, true));
+        }
         // Filter out mana abilities — they are handled automatically during mana payment
-        // and offering them as strategic choices causes infinite loops
         playable.removeIf(sa -> sa.isManaAbility());
+        // Filter out spells the player can't actually afford to cast right now.
+        // Quick check: if player has no mana in pool and no untapped mana sources,
+        // reject all non-free spells without the expensive canPayManaCost simulation.
+        boolean hasMana = !player.getManaPool().isEmpty();
+        if (!hasMana) {
+            for (Card c : player.getCardsIn(forge.game.zone.ZoneType.Battlefield)) {
+                if (!c.isUntapped()) continue;
+                for (SpellAbility ma : c.getManaAbilities()) {
+                    if (ma.canPlay()) { hasMana = true; break; }
+                }
+                if (hasMana) break;
+            }
+        }
+        if (hasMana) {
+            playable.removeIf(sa -> !sa.isLandAbility()
+                    && sa.getPayCosts() != null
+                    && sa.getPayCosts().hasManaCost()
+                    && !ComputerUtilMana.canPayManaCost(sa, player, 0, false));
+        } else {
+            // No mana available — reject everything with a mana cost
+            playable.removeIf(sa -> !sa.isLandAbility()
+                    && sa.getPayCosts() != null
+                    && sa.getPayCosts().hasManaCost()
+                    && !sa.getPayCosts().getTotalMana().isZero());
+        }
         if (playable.isEmpty()) {
             return null;
         }
@@ -191,7 +292,7 @@ public class RlPlayerController extends PlayerControllerAi {
         for (int i = 0; i < playable.size(); i++) {
             SpellAbility sa = playable.get(i);
             Card host = sa.getHostCard();
-            dp.addLegalActions(buildAction(i + 1, sa.toString(), host));
+            dp.addLegalActions(buildAction(i + 1, sa.toString(), host, null, false, sa));
         }
 
         int choice = queryAgent(dp.build());
@@ -1112,8 +1213,8 @@ public class RlPlayerController extends PlayerControllerAi {
                 "Play " + tgtSA.getHostCard().getName() + " from exile?");
         dp.setMinSelections(1);
         dp.setMaxSelections(1);
-        dp.addLegalActions(buildAction(0, "Don't play", tgtSA.getHostCard()));
-        dp.addLegalActions(buildAction(1, "Play " + tgtSA.getHostCard().getName(), tgtSA.getHostCard()));
+        dp.addLegalActions(buildAction(0, "Don't play", tgtSA.getHostCard(), null, false, null));
+        dp.addLegalActions(buildAction(1, "Play " + tgtSA.getHostCard().getName(), tgtSA.getHostCard(), null, false, tgtSA));
 
         int choice = queryAgent(dp.build());
 

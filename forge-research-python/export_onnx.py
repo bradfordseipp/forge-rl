@@ -33,7 +33,7 @@ ONNX_INPUT_KEYS = [
     "opponent_exile",      # (1, 10, 16)
     "stack",               # (1, 10, 8)
     "decision_type",       # (1, 15)
-    "action_features",     # (1, 256, 7)
+    "action_features",     # (1, 256, 20)
 ]
 
 
@@ -107,7 +107,7 @@ def make_dummy_inputs(device: torch.device = torch.device("cpu")):
         torch.full((1, 10, CARD_FEATURES), -1, dtype=torch.float32, device=device),  # opponent_exile
         torch.full((1, 10, STACK_FEATURES), -1, dtype=torch.float32, device=device), # stack
         torch.zeros(1, 15, device=device),      # decision_type
-        torch.full((1, 256, 7), -1, dtype=torch.float32, device=device),  # action_features
+        torch.full((1, 256, 20), -1, dtype=torch.float32, device=device),  # action_features
     )
 
 
@@ -119,7 +119,11 @@ def main():
 
     # Load model
     agent = Agent()
-    agent.load_state_dict(torch.load(args.checkpoint, map_location="cpu", weights_only=True))
+    ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+        agent.load_state_dict(ckpt["model_state_dict"])
+    else:
+        agent.load_state_dict(ckpt)
     agent.eval()
 
     wrapper = AgentOnnxWrapper(agent)
