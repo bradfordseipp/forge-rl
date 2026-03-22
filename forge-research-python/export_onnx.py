@@ -31,9 +31,9 @@ ONNX_INPUT_KEYS = [
     "opponent_graveyard",  # (1, 15, 16)
     "agent_exile",         # (1, 10, 16)
     "opponent_exile",      # (1, 10, 16)
-    "stack",               # (1, 10, 8)
+    "stack",               # (1, 10, 2)
     "decision_type",       # (1, 15)
-    "action_features",     # (1, 256, 20)
+    "action_features",     # (1, 256, 34)
 ]
 
 
@@ -81,12 +81,22 @@ class AgentOnnxWrapper(nn.Module):
             "action_features": action_features.float(),
         }
 
-        trunk = self.agent._get_trunk(obs)
+        scalar_enc, card_tokens, card_mask, stack_enc = self.agent._encode_board(obs)
 
-        # Compute logits (same as get_action_and_value but without masking/sampling)
-        action_enc = self.agent._encode_actions(obs["action_features"])  # (B, 256, 32)
-        trunk_proj = self.agent.trunk_to_action(trunk)                   # (B, 32)
-        logits = torch.einsum('bd,bnd->bn', trunk_proj, action_enc)      # (B, 256)
+        # Action encoding and cross-attention scoring (matches get_action_and_value)
+        action_tokens = self.agent._encode_actions(obs["action_features"])
+        # Always unmask first slot to prevent NaN (safe for ONNX tracing — no conditional)
+        safe_mask = card_mask.clone()
+        safe_mask[:, 0] = False
+        attn_out, _ = self.agent.action_card_cross_attn(
+            query=action_tokens, key=card_tokens, value=card_tokens,
+            key_padding_mask=safe_mask,
+        )
+        action_repr = self.agent.action_cross_attn_norm(action_tokens + attn_out)
+        context = torch.cat([scalar_enc, stack_enc], dim=-1)
+        context_expanded = context.unsqueeze(1).expand(-1, 256, -1)
+        score_input = torch.cat([action_repr, context_expanded], dim=-1)
+        logits = self.agent.action_score(score_input).squeeze(-1)
 
         return logits
 
@@ -107,7 +117,7 @@ def make_dummy_inputs(device: torch.device = torch.device("cpu")):
         torch.full((1, 10, CARD_FEATURES), -1, dtype=torch.float32, device=device),  # opponent_exile
         torch.full((1, 10, STACK_FEATURES), -1, dtype=torch.float32, device=device), # stack
         torch.zeros(1, 15, device=device),      # decision_type
-        torch.full((1, 256, 20), -1, dtype=torch.float32, device=device),  # action_features
+        torch.zeros(1, 256, 34, dtype=torch.float32, device=device),        # action_features
     )
 
 

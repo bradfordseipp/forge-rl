@@ -26,9 +26,9 @@ public class OnnxInferenceEngine implements AutoCloseable {
         "opponent_graveyard",   // (1, 15, 38)
         "agent_exile",          // (1, 10, 38)
         "opponent_exile",       // (1, 10, 38)
-        "stack",                // (1, 10, 8)
+        "stack",                // (1, 10, 2)
         "decision_type",        // (1, 15)
-        "action_features",      // (1, 256, 20)
+        "action_features",      // (1, 256, 34)
     };
 
     // Shapes for 2D inputs (rows, cols) — 1D inputs have cols only
@@ -43,9 +43,9 @@ public class OnnxInferenceEngine implements AutoCloseable {
         {15, 38},       // opponent_graveyard
         {10, 38},       // agent_exile
         {10, 38},       // opponent_exile
-        {10, 8},        // stack
+        {10, 2},        // stack
         null,           // decision_type: 1D, 15
-        {256, 20},      // action_features
+        {256, 34},      // action_features
     };
 
     private final OrtEnvironment env;

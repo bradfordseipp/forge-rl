@@ -38,6 +38,19 @@ class ForgeRlClient:
         request = forge_rl_pb2.StepRequest(action_index=action_index)
         return self.stub.Step(request)
 
+    def simulate(self, first_action_index: int, max_agent_decisions: int = 3):
+        """Run an MCTS simulation from the current game state.
+
+        Clones the game, takes first_action_index, then runs forward using
+        the ONNX model for up to max_agent_decisions agent decisions.
+        Returns SimulateResponse with leaf observation and terminal info.
+        """
+        request = forge_rl_pb2.SimulateRequest(
+            first_action_index=first_action_index,
+            max_agent_decisions=max_agent_decisions,
+        )
+        return self.stub.Simulate(request)
+
     def close(self):
         """Close the gRPC channel."""
         self.channel.close()

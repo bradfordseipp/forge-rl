@@ -19,7 +19,7 @@ public class ObservationConverter {
 
     // 12 scalar + 5 colors + 7 types + 14 keywords = 38
     private static final int CARD_FEATURES = 38;
-    private static final int STACK_FEATURES = 8;
+    private static final int STACK_FEATURES = 2;
     private static final int MAX_HAND = 10;
     private static final int MAX_BATTLEFIELD = 20;
     private static final int MAX_GRAVEYARD = 15;
@@ -27,28 +27,34 @@ public class ObservationConverter {
     private static final int MAX_STACK = 10;
     private static final int MAX_ACTIONS = 256;
     private static final int NUM_DECISION_TYPES = 15;
-    private static final int ACTION_FEATURES = 20;
+    private static final int ACTION_FEATURES = 34;
 
     public float[] gameInfo(Observation obs) {
         GameInfo gi = obs.getGameInfo();
-        return new float[]{gi.getTurn(), gi.getPhase(), gi.getActivePlayerIndex(), gi.getPriorityPlayerIndex(),
-                gi.getAgentMulliganCount(), gi.getOpponentMulliganCount()};
+        return new float[]{
+            gi.getTurn() / 20f,
+            gi.getPhase() / 18f,
+            gi.getActivePlayerIndex(),
+            gi.getPriorityPlayerIndex(),
+            gi.getAgentMulliganCount() / 5f,
+            gi.getOpponentMulliganCount() / 5f,
+        };
     }
 
     public float[] playerScalars(PlayerState ps) {
         ManaPool mp = ps.getManaPool();
         return new float[]{
-            ps.getLife(),
-            ps.getHandSize(),
-            ps.getLibrarySize(),
-            ps.getLandsPlayed(),
-            ps.getMaxLands(),
-            mp.getWhite(),
-            mp.getBlue(),
-            mp.getBlack(),
-            mp.getRed(),
-            mp.getGreen(),
-            mp.getColorless(),
+            ps.getLife() / 20f,
+            ps.getHandSize() / 7f,
+            ps.getLibrarySize() / 60f,
+            ps.getLandsPlayed() / 5f,
+            ps.getMaxLands() / 5f,
+            mp.getWhite() / 5f,
+            mp.getBlue() / 5f,
+            mp.getBlack() / 5f,
+            mp.getRed() / 5f,
+            mp.getGreen() / 5f,
+            mp.getColorless() / 5f,
         };
     }
 
@@ -64,9 +70,9 @@ public class ObservationConverter {
             int kw = c.getKeywordBitmask();
 
             mat[base]      = c.getNameId();
-            mat[base + 1]  = c.getPower();
-            mat[base + 2]  = c.getToughness();
-            mat[base + 3]  = c.getCmc();
+            mat[base + 1]  = c.getPower() / 20f;
+            mat[base + 2]  = c.getToughness() / 20f;
+            mat[base + 3]  = c.getCmc() / 10f;
             mat[base + 4]  = c.getTapped() ? 1f : 0f;
             mat[base + 5]  = c.getSummoningSick() ? 1f : 0f;
             // Colors unpacked: W=0, U=1, B=2, R=3, G=4
@@ -75,21 +81,20 @@ public class ObservationConverter {
             mat[base + 8]  = (colors >> 2) & 1;
             mat[base + 9]  = (colors >> 3) & 1;
             mat[base + 10] = (colors >> 4) & 1;
-            mat[base + 11] = c.getDamage();
-            mat[base + 12] = c.getLoyalty();
+            mat[base + 11] = c.getDamage() / 20f;
+            mat[base + 12] = c.getLoyalty() / 7f;
             mat[base + 13] = c.getAttacking() ? 1f : 0f;
             mat[base + 14] = c.getBlocking() ? 1f : 0f;
-            mat[base + 15] = c.getCounterCount();
-            // Types unpacked: Creature=0, Land=1, Instant=2, Sorcery=3,
-            //   Enchantment=4, Artifact=5, Planeswalker=6
+            mat[base + 15] = c.getCounterCount() / 10f;
+            // Types unpacked
             for (int b = 0; b < 7; b++) {
                 mat[base + 16 + b] = (types >> b) & 1;
             }
-            // Keywords unpacked: flying=0, first_strike=1, ..., flash=13
+            // Keywords unpacked
             for (int b = 0; b < 14; b++) {
                 mat[base + 23 + b] = (kw >> b) & 1;
             }
-            mat[base + 37] = c.getPlusOneCounterCount();
+            mat[base + 37] = c.getPlusOneCounterCount() / 10f;
         }
         return mat;
     }
@@ -101,12 +106,8 @@ public class ObservationConverter {
         for (int i = 0; i < count; i++) {
             StackEntry e = entries.get(i);
             int base = i * STACK_FEATURES;
-            mat[base]     = e.getSourceCardId();
+            mat[base]     = e.getSourceNameId();
             mat[base + 1] = e.getControllerIndex();
-            // rest are 0 (reserved), overwrite from -1
-            for (int j = 2; j < STACK_FEATURES; j++) {
-                mat[base + j] = 0f;
-            }
         }
         return mat;
     }
@@ -124,7 +125,7 @@ public class ObservationConverter {
 
     public float[] actionFeatures(DecisionPoint dp) {
         float[] mat = new float[MAX_ACTIONS * ACTION_FEATURES];
-        java.util.Arrays.fill(mat, -1f);
+        // Fill with 0 (not -1) for unused slots
         if (dp == null) return mat;
 
         for (ActionOption action : dp.getLegalActionsList()) {
@@ -136,11 +137,11 @@ public class ObservationConverter {
             float isPass = (srcNameId == 0 && srcCardId == 0) ? 1f : 0f;
 
             int base = idx * ACTION_FEATURES;
-            mat[base]      = srcNameId;  // raw int, embedded in model
+            mat[base]      = srcNameId;
             mat[base + 1]  = (float) Math.log1p(srcCardId);
             mat[base + 2]  = isPass;
             mat[base + 3]  = action.getTargetIsPlayer() ? 1f : 0f;
-            mat[base + 4]  = action.getTargetNameId();  // raw int, embedded in model
+            mat[base + 4]  = action.getTargetNameId();
             mat[base + 5]  = (float) Math.log1p(action.getTargetCardId());
             mat[base + 6]  = action.getTargetIsOwn() ? 1f : 0f;
             mat[base + 7]  = action.getSourcePower() / 20f;
@@ -154,9 +155,14 @@ public class ObservationConverter {
             mat[base + 15] = action.getCanTargetPlayers() ? 1f : 0f;
             mat[base + 16] = action.getDamageAmount() / 20f;
             int typeBm = action.getSourceTypeBitmask();
-            mat[base + 17] = (typeBm & 1) != 0 ? 1f : 0f;       // creature
-            mat[base + 18] = (typeBm & 2) != 0 ? 1f : 0f;       // land
-            mat[base + 19] = (typeBm & 0xC) != 0 ? 1f : 0f;     // instant or sorcery
+            mat[base + 17] = (typeBm & 1) != 0 ? 1f : 0f;
+            mat[base + 18] = (typeBm & 2) != 0 ? 1f : 0f;
+            mat[base + 19] = (typeBm & 0xC) != 0 ? 1f : 0f;
+            // Source keyword bits (14)
+            int kwBm = action.getSourceKeywordBitmask();
+            for (int b = 0; b < 14; b++) {
+                mat[base + 20 + b] = (kwBm >> b) & 1;
+            }
         }
         return mat;
     }

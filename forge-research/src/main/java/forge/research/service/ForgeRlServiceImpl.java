@@ -5,6 +5,8 @@ import forge.research.RlGameManager;
 import forge.research.proto.ForgeRlServiceGrpc;
 import forge.research.proto.ResetRequest;
 import forge.research.proto.ResetResponse;
+import forge.research.proto.SimulateRequest;
+import forge.research.proto.SimulateResponse;
 import forge.research.proto.StepRequest;
 import forge.research.proto.StepResponse;
 import io.grpc.stub.StreamObserver;
@@ -70,6 +72,30 @@ public class ForgeRlServiceImpl extends ForgeRlServiceGrpc.ForgeRlServiceImplBas
             responseObserver.onError(
                     io.grpc.Status.INTERNAL
                             .withDescription("Step failed: " + e.getMessage())
+                            .withCause(e)
+                            .asRuntimeException());
+        }
+    }
+
+    @Override
+    public void simulate(SimulateRequest request, StreamObserver<SimulateResponse> responseObserver) {
+        try {
+            RlGameManager.SimulationResult result = gameManager.simulate(
+                    request.getFirstActionIndex(),
+                    request.getMaxAgentDecisions());
+
+            SimulateResponse.Builder response = SimulateResponse.newBuilder();
+            response.setLeafObservation(result.leafObservation);
+            response.setGameEnded(result.gameEnded);
+            response.setTerminalReward(result.terminalReward);
+            response.setDecisionsPlayed(result.decisionsPlayed);
+
+            responseObserver.onNext(response.build());
+            responseObserver.onCompleted();
+        } catch (Exception e) {
+            responseObserver.onError(
+                    io.grpc.Status.INTERNAL
+                            .withDescription("Simulate failed: " + e.getMessage())
                             .withCause(e)
                             .asRuntimeException());
         }
