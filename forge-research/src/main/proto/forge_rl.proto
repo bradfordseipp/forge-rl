@@ -8,6 +8,7 @@ option java_multiple_files = true;
 service ForgeRlService {
     rpc Reset(ResetRequest) returns (ResetResponse);
     rpc Step(StepRequest) returns (StepResponse);
+    rpc Simulate(SimulateRequest) returns (SimulateResponse);
 }
 
 // ─── Requests ───────────────────────────────────────────────
@@ -103,6 +104,18 @@ message CardState {
     repeated string types = 18;
     repeated string keywords = 19;
     repeated CounterState counters = 20;
+
+    // Encoded type/keyword/counter features for RL observation vector
+    // type_bitmask bits: 0=Creature, 1=Land, 2=Instant, 3=Sorcery,
+    //   4=Enchantment, 5=Artifact, 6=Planeswalker
+    int32 type_bitmask = 21;
+    // keyword_bitmask bits: 0=flying, 1=first_strike, 2=double_strike,
+    //   3=deathtouch, 4=lifelink, 5=trample, 6=haste, 7=reach,
+    //   8=vigilance, 9=menace, 10=defender, 11=hexproof,
+    //   12=indestructible, 13=flash
+    int32 keyword_bitmask = 22;
+    // Count of +1/+1 counters specifically (most strategically relevant)
+    int32 plus_one_counter_count = 23;
 }
 
 message CounterState {
@@ -115,6 +128,7 @@ message StackEntry {
     string description = 2;
     int32 controller_index = 3;
     string source_card_name = 4;
+    int32 source_name_id = 5;
 }
 
 message CombatState {
@@ -167,6 +181,40 @@ message ActionOption {
     int32 target_name_id = 7;
     bool target_is_own = 8;    // true if target belongs to the acting player
     bool target_is_player = 9; // true if target is a player (not a card)
+
+    // Source card mechanical properties
+    int32 source_power = 10;
+    int32 source_toughness = 11;
+    int32 source_cmc = 12;
+    int32 source_type_bitmask = 13;    // same encoding as CardState.type_bitmask
+    int32 source_keyword_bitmask = 14; // same encoding as CardState.keyword_bitmask
+
+    // Cost components (what does this action cost beyond mana?)
+    bool cost_taps_self = 15;
+    bool cost_sacrifices = 16;
+    bool cost_pays_life = 17;
+    bool cost_exiles_from_graveyard = 18;
+
+    // Target restriction metadata (what CAN this ability target?)
+    bool can_target_creatures = 19;
+    bool can_target_players = 20;
+
+    // Effect metadata
+    int32 damage_amount = 21;
+}
+
+// ─── MCTS Simulation ────────────────────────────────────────
+
+message SimulateRequest {
+    int32 first_action_index = 1;       // action to take from current state
+    int32 max_agent_decisions = 2;      // how many agent decisions to simulate forward
+}
+
+message SimulateResponse {
+    Observation leaf_observation = 1;    // observation at simulation leaf
+    bool game_ended = 2;                // true if game ended during simulation
+    float terminal_reward = 3;          // +1/-1 if game ended, 0 otherwise
+    int32 decisions_played = 4;         // how many agent decisions were made
 }
 
 // ─── Game Result ────────────────────────────────────────────

@@ -58,8 +58,9 @@ public class ObservationBuilder {
         info.setPhase(phaseToInt(ph.getPhase()));
         Player active = ph.getPlayerTurn();
         Player priority = ph.getPriorityPlayer();
-        info.setActivePlayerIndex(active != null ? active.getId() : -1);
-        info.setPriorityPlayerIndex(priority != null ? priority.getId() : -1);
+        // Use logical indices: 0 = agent, 1 = opponent, -1 = unknown
+        info.setActivePlayerIndex(active != null ? (active == agent ? 0 : 1) : -1);
+        info.setPriorityPlayerIndex(priority != null ? (priority == agent ? 0 : 1) : -1);
         info.setAgentMulliganCount(agent.getStats().getMulliganCount());
         info.setOpponentMulliganCount(opponent.getStats().getMulliganCount());
         return info.build();
@@ -126,10 +127,10 @@ public class ObservationBuilder {
         cs.setLoyalty(c.getCurrentLoyalty());
 
         Player controller = c.getController();
-        cs.setControllerIndex(controller != null ? controller.getId() : -1);
+        cs.setControllerIndex(controller != null ? (controller == agent ? 0 : 1) : -1);
 
         Player owner = c.getOwner();
-        cs.setOwnerIndex(owner != null ? owner.getId() : -1);
+        cs.setOwnerIndex(owner != null ? (owner == agent ? 0 : 1) : -1);
 
         Game game = c.getGame();
         boolean attacking = false;
@@ -160,13 +161,29 @@ public class ObservationBuilder {
             cs.addKeywords(kw.getOriginal());
         }
 
-        // Types
+        // Types (string list + bitmask)
+        int typeBitmask = computeTypeBitmask(c);
         for (forge.card.CardType.CoreType ct : c.getType().getCoreTypes()) {
             cs.addTypes(ct.name());
         }
+        cs.setTypeBitmask(typeBitmask);
         for (String st : c.getType().getSubtypes()) {
             cs.addTypes(st);
         }
+
+        // Keyword bitmask (using Keyword enum names)
+        int keywordBitmask = computeKeywordBitmask(c);
+        cs.setKeywordBitmask(keywordBitmask);
+
+        // +1/+1 counters specifically
+        int p1p1Count = 0;
+        for (Map.Entry<CounterType, Integer> entry : counters.entrySet()) {
+            if (entry.getKey().getName().equals("+1/+1")) {
+                p1p1Count = entry.getValue();
+                break;
+            }
+        }
+        cs.setPlusOneCounterCount(p1p1Count);
 
         return cs.build();
     }
@@ -176,9 +193,11 @@ public class ObservationBuilder {
         Card source = si.getSourceCard();
         entry.setSourceCardId(source.getId());
         entry.setSourceCardName(source.getName());
+        entry.setSourceNameId(cardRegistry.getNameId(source.getName()));
         entry.setDescription(si.getStackDescription());
         Player controller = si.getActivatingPlayer();
-        entry.setControllerIndex(controller != null ? controller.getId() : -1);
+        // Logical index: 0 = agent, 1 = opponent
+        entry.setControllerIndex(controller != null ? (controller == agent ? 0 : 1) : -1);
         return entry.build();
     }
 
@@ -209,5 +228,46 @@ public class ObservationBuilder {
             return -1;
         }
         return phase.ordinal();
+    }
+
+    public static int computeTypeBitmask(Card c) {
+        int bitmask = 0;
+        for (forge.card.CardType.CoreType ct : c.getType().getCoreTypes()) {
+            switch (ct) {
+                case Creature:    bitmask |= (1 << 0); break;
+                case Land:        bitmask |= (1 << 1); break;
+                case Instant:     bitmask |= (1 << 2); break;
+                case Sorcery:     bitmask |= (1 << 3); break;
+                case Enchantment: bitmask |= (1 << 4); break;
+                case Artifact:    bitmask |= (1 << 5); break;
+                case Planeswalker:bitmask |= (1 << 6); break;
+                default: break;
+            }
+        }
+        return bitmask;
+    }
+
+    public static int computeKeywordBitmask(Card c) {
+        int bitmask = 0;
+        for (KeywordInterface kw : c.getKeywords()) {
+            switch (kw.getKeyword()) {
+                case FLYING:         bitmask |= (1 << 0); break;
+                case FIRST_STRIKE:   bitmask |= (1 << 1); break;
+                case DOUBLE_STRIKE:  bitmask |= (1 << 2); break;
+                case DEATHTOUCH:     bitmask |= (1 << 3); break;
+                case LIFELINK:       bitmask |= (1 << 4); break;
+                case TRAMPLE:        bitmask |= (1 << 5); break;
+                case HASTE:          bitmask |= (1 << 6); break;
+                case REACH:          bitmask |= (1 << 7); break;
+                case VIGILANCE:      bitmask |= (1 << 8); break;
+                case MENACE:         bitmask |= (1 << 9); break;
+                case DEFENDER:       bitmask |= (1 << 10); break;
+                case HEXPROOF:       bitmask |= (1 << 11); break;
+                case INDESTRUCTIBLE: bitmask |= (1 << 12); break;
+                case FLASH:          bitmask |= (1 << 13); break;
+                default: break;
+            }
+        }
+        return bitmask;
     }
 }

@@ -126,6 +126,35 @@ public class ForgeResearchServer {
         for (String name : cardNames) {
             db.attemptToLoadCard(name);
         }
+
+        // Scan loaded card files for TokenScript$ references and preload those tokens
+        String cardDir = forge.localinstance.properties.ForgeConstants.CARD_DATA_DIR;
+        Set<String> tokenNames = new HashSet<>();
+        Pattern tokenPattern = Pattern.compile("TokenScript\\$\\s*([\\w,]+)");
+        for (String name : cardNames) {
+            String fileName = name.toLowerCase().replace(" ", "_").replace("'", "").replace(",", "");
+            String firstChar = fileName.substring(0, 1);
+            File cardFile = new File(cardDir + firstChar + File.separator + fileName + ".txt");
+            if (cardFile.exists()) {
+                try {
+                    for (String line : Files.readAllLines(cardFile.toPath())) {
+                        Matcher m = tokenPattern.matcher(line);
+                        if (m.find()) {
+                            for (String token : m.group(1).split(",")) {
+                                tokenNames.add(token.trim());
+                            }
+                        }
+                    }
+                } catch (IOException ignored) {}
+            }
+        }
+        if (!tokenNames.isEmpty()) {
+            System.out.println("Preloading " + tokenNames.size() + " tokens: " + tokenNames);
+            for (String token : tokenNames) {
+                db.attemptToLoadToken(token);
+            }
+        }
+
         System.out.println("Card preloading complete.");
     }
 }

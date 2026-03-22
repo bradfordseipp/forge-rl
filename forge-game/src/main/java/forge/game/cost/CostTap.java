@@ -72,6 +72,11 @@ public class CostTap extends CostPart {
     @Override
     public boolean payAsDecided(Player payer, PaymentDecision decision, SpellAbility ability, final boolean effect) {
         Card hostCard = ability.getHostCard();
+        if (hostCard.isTapped()) {
+            System.err.println("[MANA_CHEAT] Attempted to tap already-tapped card: "
+                    + hostCard.getName() + " (id=" + hostCard.getId() + ") for " + ability);
+            return false;
+        }
         if (hostCard.tap(true, ability, payer)) {
             final Map<AbilityKey, Object> runParams = AbilityKey.newMap();
             runParams.put(AbilityKey.Cards, new CardCollection(hostCard));

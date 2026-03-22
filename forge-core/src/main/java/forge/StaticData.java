@@ -419,6 +419,16 @@ public class StaticData {
 
     public TokenDb getAllTokens() { return allTokens; }
 
+    public void attemptToLoadToken(String tokenName) {
+        if (tokenReader == null || allTokens == null) return;
+        if (allTokens.containsRule(tokenName)) return;
+        CardRules rules = tokenReader.attemptToLoadCard(tokenName);
+        if (rules != null) {
+            System.out.println("[LazyLoad] Loading token: " + tokenName);
+            allTokens.getRules().put(rules.getNormalizedName(), rules);
+        }
+    }
+
     public boolean allowCustomCardsInDecksConformance() {
         return this.allowCustomCardsInDecksConformance;
     }

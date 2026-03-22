@@ -13,6 +13,7 @@ import ai.onnxruntime.OrtException;
 import java.util.Random;
 
 import forge.deck.Deck;
+import forge.game.GameSnapshot;
 import forge.deck.io.DeckSerializer;
 import forge.game.Game;
 import forge.game.GameEndReason;
@@ -240,6 +241,116 @@ public class RlGameManager {
         }
     }
 
+    /**
+     * Run an MCTS simulation from the current game state.
+     * Clones the game, takes the specified first action, then runs forward
+     * using the ONNX model for all decisions until max_agent_decisions or game over.
+     *
+     * Returns a SimulationResult with the leaf observation and terminal info.
+     */
+    public SimulationResult simulate(int firstActionIndex, int maxAgentDecisions) {
+        if (currentGame == null || onnxEngine == null) {
+            throw new IllegalStateException("No active game or ONNX engine for simulation");
+        }
+
+        try {
+            // Create MCTS lobby players (both use ONNX inference)
+            int agentIdx = 0;
+            int oppIdx = 1;
+            MctsLobbyPlayer agentLobby = new MctsLobbyPlayer(
+                    "MCTS_Agent", onnxEngine, agentIdx, true, maxAgentDecisions);
+            MctsLobbyPlayer oppLobby = new MctsLobbyPlayer(
+                    "MCTS_Opponent", onnxEngine, oppIdx, false, maxAgentDecisions);
+
+            List<RegisteredPlayer> simPlayers = new ArrayList<>();
+            // Match original player order
+            for (Player p : currentGame.getPlayers()) {
+                if (p == agentPlayer) {
+                    simPlayers.add(new RegisteredPlayer(p.getRegisteredPlayer().getDeck()).setPlayer(agentLobby));
+                } else {
+                    simPlayers.add(new RegisteredPlayer(p.getRegisteredPlayer().getDeck()).setPlayer(oppLobby));
+                }
+            }
+
+            // Clone game state into a new Game with simulation players
+            GameSnapshot snapshot = new GameSnapshot(currentGame);
+            Game simGame = snapshot.makeCopy(simPlayers, true);
+
+            // Identify agent and opponent in the cloned game
+            Player simAgent = null;
+            Player simOpponent = null;
+            for (Player p : simGame.getPlayers()) {
+                if (p.getController() instanceof MctsSimulationController) {
+                    MctsSimulationController ctrl = (MctsSimulationController) p.getController();
+                    if (p.getLobbyPlayer() == agentLobby) {
+                        simAgent = p;
+                    } else {
+                        simOpponent = p;
+                    }
+                }
+            }
+            if (simAgent == null || simOpponent == null) {
+                throw new IllegalStateException("Could not identify sim players");
+            }
+
+            // Inject the first action: the agent's controller will use this
+            // on its first queryAgent call instead of running inference
+            MctsSimulationController agentCtrl =
+                    (MctsSimulationController) simAgent.getController();
+
+            // Run the cloned game to completion (or until decision limit)
+            final Player fSimAgent = simAgent;
+            final Player fSimOpponent = simOpponent;
+            Match simMatch = simGame.getMatch();
+
+            // Run on current thread (blocking)
+            try {
+                simMatch.startGame(simGame);
+            } catch (Exception e) {
+                // Game may throw on forced end — that's fine
+            }
+
+            // Build result
+            ObservationBuilder simObsBuilder = new ObservationBuilder();
+            Observation leafObs = simObsBuilder.buildObservation(simGame, fSimAgent, fSimOpponent);
+            boolean gameEnded = simGame.isGameOver();
+            float reward = 0f;
+            if (gameEnded) {
+                GameOutcome outcome = simGame.getOutcome();
+                if (outcome != null && !outcome.isDraw()) {
+                    reward = outcome.isWinner(fSimAgent.getLobbyPlayer()) ? 1f : -1f;
+                }
+            }
+
+            return new SimulationResult(leafObs, gameEnded, reward, agentCtrl.getAgentDecisionCount());
+
+        } catch (Exception e) {
+            System.err.println("Simulation failed: " + e.getMessage());
+            e.printStackTrace();
+            // Return a neutral result on failure
+            Observation fallbackObs = observationBuilder.buildObservation(currentGame, agentPlayer, opponentPlayer);
+            return new SimulationResult(fallbackObs, false, 0f, 0);
+        }
+    }
+
+    /**
+     * Result of an MCTS simulation rollout.
+     */
+    public static class SimulationResult {
+        public final Observation leafObservation;
+        public final boolean gameEnded;
+        public final float terminalReward;
+        public final int decisionsPlayed;
+
+        public SimulationResult(Observation leafObservation, boolean gameEnded,
+                float terminalReward, int decisionsPlayed) {
+            this.leafObservation = leafObservation;
+            this.gameEnded = gameEnded;
+            this.terminalReward = terminalReward;
+            this.decisionsPlayed = decisionsPlayed;
+        }
+    }
+
     public GameResult buildGameResult() {
         GameResult.Builder result = GameResult.newBuilder();
         if (lastOutcome == null) {
@@ -254,7 +365,7 @@ public class RlGameManager {
         } else {
             result.setIsDraw(false);
             result.setWinnerIndex(
-                    lastOutcome.isWinner(agentPlayer.getLobbyPlayer()) ? agentPlayer.getId() : opponentPlayer.getId());
+                    lastOutcome.isWinner(agentPlayer.getLobbyPlayer()) ? 0 : 1);
         }
         result.setWinCondition(lastOutcome.getWinCondition() != null
                 ? lastOutcome.getWinCondition().name() : "Unknown");
