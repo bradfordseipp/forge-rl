@@ -8,6 +8,7 @@ option java_multiple_files = true;
 service ForgeRlService {
     rpc Reset(ResetRequest) returns (ResetResponse);
     rpc Step(StepRequest) returns (StepResponse);
+    rpc Simulate(SimulateRequest) returns (SimulateResponse);
 }
 
 // ─── Requests ───────────────────────────────────────────────
@@ -200,6 +201,20 @@ message ActionOption {
 
     // Effect metadata
     int32 damage_amount = 21;
+}
+
+// ─── MCTS Simulation ────────────────────────────────────────
+
+message SimulateRequest {
+    int32 first_action_index = 1;       // action to take from current state
+    int32 max_agent_decisions = 2;      // how many agent decisions to simulate forward
+}
+
+message SimulateResponse {
+    Observation leaf_observation = 1;    // observation at simulation leaf
+    bool game_ended = 2;                // true if game ended during simulation
+    float terminal_reward = 3;          // +1/-1 if game ended, 0 otherwise
+    int32 decisions_played = 4;         // how many agent decisions were made
 }
 
 // ─── Game Result ────────────────────────────────────────────
