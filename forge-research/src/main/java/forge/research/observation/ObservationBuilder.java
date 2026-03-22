@@ -58,8 +58,9 @@ public class ObservationBuilder {
         info.setPhase(phaseToInt(ph.getPhase()));
         Player active = ph.getPlayerTurn();
         Player priority = ph.getPriorityPlayer();
-        info.setActivePlayerIndex(active != null ? active.getId() : -1);
-        info.setPriorityPlayerIndex(priority != null ? priority.getId() : -1);
+        // Use logical indices: 0 = agent, 1 = opponent, -1 = unknown
+        info.setActivePlayerIndex(active != null ? (active == agent ? 0 : 1) : -1);
+        info.setPriorityPlayerIndex(priority != null ? (priority == agent ? 0 : 1) : -1);
         info.setAgentMulliganCount(agent.getStats().getMulliganCount());
         info.setOpponentMulliganCount(opponent.getStats().getMulliganCount());
         return info.build();
@@ -126,10 +127,10 @@ public class ObservationBuilder {
         cs.setLoyalty(c.getCurrentLoyalty());
 
         Player controller = c.getController();
-        cs.setControllerIndex(controller != null ? controller.getId() : -1);
+        cs.setControllerIndex(controller != null ? (controller == agent ? 0 : 1) : -1);
 
         Player owner = c.getOwner();
-        cs.setOwnerIndex(owner != null ? owner.getId() : -1);
+        cs.setOwnerIndex(owner != null ? (owner == agent ? 0 : 1) : -1);
 
         Game game = c.getGame();
         boolean attacking = false;
@@ -192,9 +193,11 @@ public class ObservationBuilder {
         Card source = si.getSourceCard();
         entry.setSourceCardId(source.getId());
         entry.setSourceCardName(source.getName());
+        entry.setSourceNameId(cardRegistry.getNameId(source.getName()));
         entry.setDescription(si.getStackDescription());
         Player controller = si.getActivatingPlayer();
-        entry.setControllerIndex(controller != null ? controller.getId() : -1);
+        // Logical index: 0 = agent, 1 = opponent
+        entry.setControllerIndex(controller != null ? (controller == agent ? 0 : 1) : -1);
         return entry.build();
     }
 

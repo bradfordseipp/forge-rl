@@ -22,10 +22,10 @@ NUM_TYPE_BITS = 7        # Creature, Land, Instant, Sorcery, Enchantment, Artifa
 NUM_KEYWORD_BITS = 14    # flying, first_strike, ..., flash
 # 12 scalar features + 5 colors + 7 types + 14 keywords = 38
 CARD_FEATURES = 38
-STACK_FEATURES = 8
+STACK_FEATURES = 2      # source_card_id, controller_index (trimmed dead features)
 MAX_ACTIONS = 256
 NUM_DECISION_TYPES = 15
-ACTION_FEATURES = 20
+ACTION_FEATURES = 34    # 20 original + 14 source keyword bits
 
 # Card feature layout (after bitmask unpacking):
 #  0: name_id, 1: power, 2: toughness, 3: cmc,
@@ -89,7 +89,7 @@ class ForgeRlEnv(gym.Env):
             "opponent_graveyard": spaces.Box(low=-1, high=100000, shape=(MAX_GRAVEYARD, CARD_FEATURES), dtype=np.float32),
             "agent_exile": spaces.Box(low=-1, high=100000, shape=(MAX_EXILE, CARD_FEATURES), dtype=np.float32),
             "opponent_exile": spaces.Box(low=-1, high=100000, shape=(MAX_EXILE, CARD_FEATURES), dtype=np.float32),
-            "stack": spaces.Box(low=-1, high=100000, shape=(MAX_STACK, STACK_FEATURES), dtype=np.int32),
+            "stack": spaces.Box(low=-1, high=100000, shape=(MAX_STACK, STACK_FEATURES), dtype=np.float32),
             "action_mask": spaces.Box(low=0, high=1, shape=(MAX_ACTIONS,), dtype=np.int8),
             "decision_type": spaces.Box(low=0, high=1, shape=(NUM_DECISION_TYPES,), dtype=np.int8),
             "action_features": spaces.Box(low=-1, high=100, shape=(MAX_ACTIONS, ACTION_FEATURES), dtype=np.float32),
@@ -185,7 +185,7 @@ class ForgeRlEnv(gym.Env):
                 decision_type[dt] = 1
         result["decision_type"] = decision_type
 
-        # Per-action features (20 total):
+        # Per-action features (34 total):
         #   0: source_name_id (embedded), 1: log_card_id, 2: is_pass,
         #   3: target_is_player, 4: target_name_id (embedded), 5: log_target_card_id,
         #   6: target_is_own,
@@ -194,8 +194,11 @@ class ForgeRlEnv(gym.Env):
         #   13: cost_exiles_from_graveyard,
         #   14: can_target_creatures, 15: can_target_players,
         #   16: damage_amount/20,
-        #   17: source_is_creature, 18: source_is_land, 19: source_is_instant_or_sorcery
-        action_features = np.full((MAX_ACTIONS, ACTION_FEATURES), -1, dtype=np.float32)
+        #   17: source_is_creature, 18: source_is_land, 19: source_is_instant_or_sorcery,
+        #   20-33: source keyword bits (flying, first_strike, double_strike, deathtouch,
+        #          lifelink, trample, haste, reach, vigilance, menace, defender,
+        #          hexproof, indestructible, flash)
+        action_features = np.zeros((MAX_ACTIONS, ACTION_FEATURES), dtype=np.float32)
         if decision_point and decision_point.legal_actions:
             for action in decision_point.legal_actions:
                 idx = action.index
@@ -204,6 +207,7 @@ class ForgeRlEnv(gym.Env):
                     src_card_id = action.source_card_id
                     is_pass = 1.0 if (src_name_id == 0 and src_card_id == 0) else 0.0
                     type_bm = action.source_type_bitmask
+                    kw_bm = action.source_keyword_bitmask
                     action_features[idx] = [
                         float(src_name_id),
                         np.log1p(src_card_id),
@@ -225,6 +229,12 @@ class ForgeRlEnv(gym.Env):
                         1.0 if (type_bm & 1) else 0.0,       # creature
                         1.0 if (type_bm & 2) else 0.0,       # land
                         1.0 if (type_bm & 0xC) else 0.0,     # instant or sorcery
+                        # Source keyword bits (14)
+                        (kw_bm >> 0) & 1, (kw_bm >> 1) & 1, (kw_bm >> 2) & 1,
+                        (kw_bm >> 3) & 1, (kw_bm >> 4) & 1, (kw_bm >> 5) & 1,
+                        (kw_bm >> 6) & 1, (kw_bm >> 7) & 1, (kw_bm >> 8) & 1,
+                        (kw_bm >> 9) & 1, (kw_bm >> 10) & 1, (kw_bm >> 11) & 1,
+                        (kw_bm >> 12) & 1, (kw_bm >> 13) & 1,
                     ]
         result["action_features"] = action_features
 
@@ -256,19 +266,19 @@ class ForgeRlEnv(gym.Env):
             kw = card.keyword_bitmask
             mat[i] = [
                 card.name_id,
-                card.power,
-                card.toughness,
-                card.cmc,
+                card.power / 20.0,
+                card.toughness / 20.0,
+                card.cmc / 10.0,
                 int(card.tapped),
                 int(card.summoning_sick),
                 # Colors unpacked: W=bit0, U=bit1, B=bit2, R=bit3, G=bit4
                 (colors >> 0) & 1, (colors >> 1) & 1, (colors >> 2) & 1,
                 (colors >> 3) & 1, (colors >> 4) & 1,
-                card.damage,
-                card.loyalty,
+                card.damage / 20.0,
+                card.loyalty / 7.0,
                 int(card.attacking),
                 int(card.blocking),
-                card.counter_count,
+                card.counter_count / 10.0,
                 # Types unpacked
                 (types >> 0) & 1, (types >> 1) & 1, (types >> 2) & 1,
                 (types >> 3) & 1, (types >> 4) & 1, (types >> 5) & 1,
@@ -278,19 +288,18 @@ class ForgeRlEnv(gym.Env):
                 (kw >> 4) & 1, (kw >> 5) & 1, (kw >> 6) & 1, (kw >> 7) & 1,
                 (kw >> 8) & 1, (kw >> 9) & 1, (kw >> 10) & 1, (kw >> 11) & 1,
                 (kw >> 12) & 1, (kw >> 13) & 1,
-                card.plus_one_counter_count,
+                card.plus_one_counter_count / 10.0,
             ]
         return mat
 
     def _stack_matrix(self, stack_entries) -> np.ndarray:
-        mat = np.full((MAX_STACK, STACK_FEATURES), -1, dtype=np.int32)
+        mat = np.full((MAX_STACK, STACK_FEATURES), -1, dtype=np.float32)
         for i, entry in enumerate(stack_entries):
             if i >= MAX_STACK:
                 break
             mat[i] = [
-                entry.source_card_id,
-                entry.controller_index,
-                0, 0, 0, 0, 0, 0,  # reserved for future features
+                entry.source_name_id,        # card identity (embeddable)
+                entry.controller_index,       # 0=agent, 1=opponent
             ]
         return mat
 

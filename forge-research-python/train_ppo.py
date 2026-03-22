@@ -6,7 +6,7 @@ import random
 import socket
 import subprocess
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -103,13 +103,17 @@ CARD_ZONES = [
     "agent_exile", "opponent_exile",
 ]
 CARD_FEATURES = 38  # 12 scalar + 5 colors + 7 types + 14 keywords
-STACK_FEATURES = 8
+STACK_FEATURES = 2  # source_name_id, controller_index (0=agent, 1=opponent)
 # Zone sizes (must match env.py)
 ZONE_SIZES = {"agent_hand": 10, "agent_battlefield": 20, "opponent_battlefield": 20,
               "agent_graveyard": 15, "opponent_graveyard": 15, "agent_exile": 10, "opponent_exile": 10}
 TOTAL_CARD_SLOTS = sum(ZONE_SIZES.values())  # 100
-CARD_VOCAB_SIZE = 512   # max unique card names (name_id 0 reserved for padding)
+CARD_VOCAB_SIZE = 4096  # max unique card names (name_id 0 reserved for padding)
 CARD_EMBED_DIM = 64     # learned embedding dimension per card name
+NUM_ZONES = len(CARD_ZONES)  # 7
+CARD_TOKEN_DIM = 64     # per-card token dimension fed into attention
+ATTN_HEADS = 4
+ATTN_LAYERS = 2
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -129,15 +133,33 @@ class Agent(nn.Module):
         )
 
         # Card name embedding (name_id → learned vector)
-        # padding_idx=0: name_id=0 maps to zero vector (used for padding)
         self.card_name_embedding = nn.Embedding(CARD_VOCAB_SIZE, CARD_EMBED_DIM, padding_idx=0)
 
-        # Card encoder (shared across all 7 zones)
-        # Input: CARD_EMBED_DIM (embedded name) + CARD_FEATURES - 1 (remaining features, minus raw name_id)
-        card_input_dim = CARD_EMBED_DIM + CARD_FEATURES - 1
-        self.card_encoded_dim = 32
-        self.card_encoder = nn.Sequential(
-            layer_init(nn.Linear(card_input_dim, self.card_encoded_dim)),
+        # Zone embedding: learned vector per zone, added to each card token
+        self.zone_embedding = nn.Embedding(NUM_ZONES, CARD_TOKEN_DIM)
+
+        # Card projection: raw features → token dim for attention
+        card_input_dim = CARD_EMBED_DIM + CARD_FEATURES - 1  # 64 + 37 = 101
+        self.card_proj = nn.Sequential(
+            layer_init(nn.Linear(card_input_dim, CARD_TOKEN_DIM)),
+            nn.ReLU(),
+        )
+
+        # Cross-zone transformer: self-attention over all card tokens
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=CARD_TOKEN_DIM,
+            nhead=ATTN_HEADS,
+            dim_feedforward=CARD_TOKEN_DIM * 4,
+            dropout=0.0,
+            activation="relu",
+            batch_first=True,
+        )
+        self.card_transformer = nn.TransformerEncoder(encoder_layer, num_layers=ATTN_LAYERS)
+
+        # Pool attention output to fixed-size vector
+        card_pool_dim = 128
+        self.card_pool = nn.Sequential(
+            layer_init(nn.Linear(CARD_TOKEN_DIM, card_pool_dim)),
             nn.ReLU(),
         )
 
@@ -147,52 +169,63 @@ class Agent(nn.Module):
             nn.ReLU(),
         )
 
-        # Trunk: 64 (scalars) + 100*16 (cards: concat all slots) + 16 (stack) = 1680
-        trunk_input = 64 + TOTAL_CARD_SLOTS * self.card_encoded_dim + 16  # 1680
+        # Trunk: 64 (scalars) + 128 (card pool) + 16 (stack) = 208
+        trunk_input = 64 + card_pool_dim + 16
         trunk_dim = 256
         self.trunk = nn.Sequential(
-            layer_init(nn.Linear(trunk_input, 1536)),
-            nn.ReLU(),
-            layer_init(nn.Linear(1536, 512)),
+            layer_init(nn.Linear(trunk_input, 512)),
             nn.ReLU(),
             layer_init(nn.Linear(512, trunk_dim)),
             nn.ReLU(),
         )
 
         # Action encoder: per-action features → embedding
-        # Input: 2 * CARD_EMBED_DIM (source + target name embeddings) + 18 (other features)
-        action_input_dim = 2 * CARD_EMBED_DIM + 18
+        # 2 name embeddings + 18 original other features + 14 keyword bits = 32 other
+        action_input_dim = 2 * CARD_EMBED_DIM + 32
         action_dim = 512
         self.action_encoder = nn.Sequential(
             layer_init(nn.Linear(action_input_dim, action_dim)),
             nn.ReLU(),
         )
-        # Project trunk to action embedding space for dot-product scoring
         self.trunk_to_action = layer_init(nn.Linear(trunk_dim, action_dim), std=0.01)
 
         # Critic head
         self.critic = layer_init(nn.Linear(trunk_dim, 1), std=1.0)
 
-    def _encode_cards(self, card_matrix: torch.Tensor) -> torch.Tensor:
-        """Encode a (batch, max_cards, features) matrix via shared card encoder.
+    def _tokenize_cards(self, obs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build card tokens from all zones with zone embeddings.
 
-        Concatenates per-card encodings (padding slots are zeroed).
-        Output: (batch, max_cards * card_encoded_dim)
+        Returns:
+            tokens: (batch, TOTAL_CARD_SLOTS, CARD_TOKEN_DIM)
+            key_padding_mask: (batch, TOTAL_CARD_SLOTS) — True for padding slots
         """
-        # Mask: cards with all -1 are padding
-        valid = (card_matrix[:, :, 0] >= 0).float().unsqueeze(-1)  # (batch, max_cards, 1)
+        all_tokens = []
+        all_masks = []
 
-        # Embed name_id (feature 0), clamp to valid range for padding
-        name_ids = card_matrix[:, :, 0].long().clamp(min=0, max=CARD_VOCAB_SIZE - 1)
-        name_emb = self.card_name_embedding(name_ids)  # (batch, max_cards, CARD_EMBED_DIM)
+        for zone_idx, zone in enumerate(CARD_ZONES):
+            card_matrix = obs[zone]  # (batch, zone_size, CARD_FEATURES)
+            batch_size = card_matrix.shape[0]
 
-        # Concat embedding with remaining features (skip feature 0 = raw name_id)
-        other_features = card_matrix[:, :, 1:].float()  # (batch, max_cards, CARD_FEATURES-1)
-        card_input = torch.cat([name_emb, other_features], dim=-1)
+            # Padding mask: cards with first feature < 0 are empty
+            is_padding = card_matrix[:, :, 0] < 0  # (batch, zone_size)
 
-        encoded = self.card_encoder(card_input)  # (batch, max_cards, 16)
-        encoded = encoded * valid  # zero out padding slots
-        return encoded.reshape(encoded.shape[0], -1)  # (batch, max_cards * 16)
+            # Embed name_id and project features
+            name_ids = card_matrix[:, :, 0].long().clamp(min=0, max=CARD_VOCAB_SIZE - 1)
+            name_emb = self.card_name_embedding(name_ids)
+            other_features = card_matrix[:, :, 1:].float()
+            card_input = torch.cat([name_emb, other_features], dim=-1)
+            tokens = self.card_proj(card_input)  # (batch, zone_size, CARD_TOKEN_DIM)
+
+            # Add zone embedding
+            tokens = tokens + self.zone_embedding.weight[zone_idx]
+
+            # Zero out padding tokens
+            tokens = tokens * (~is_padding).float().unsqueeze(-1)
+
+            all_tokens.append(tokens)
+            all_masks.append(is_padding)
+
+        return torch.cat(all_tokens, dim=1), torch.cat(all_masks, dim=1)
 
     def _encode_stack(self, stack_matrix: torch.Tensor) -> torch.Tensor:
         """Encode stack entries with mean pooling."""
@@ -204,26 +237,44 @@ class Agent(nn.Module):
         return pooled
 
     def _get_trunk(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
-        # Scalars
-        scalars = torch.cat([
-            obs["game_info"].float(),
-            obs["agent_scalars"].float(),
-            obs["opponent_scalars"].float(),
-            obs["decision_type"].float(),
-        ], dim=-1)  # (batch, 41)
+        # Scalars (normalized)
+        gi = obs["game_info"].float()
+        # game_info: turn/20, phase/18, active_player(0/1), priority_player(0/1), mull_counts/5
+        gi_norm = torch.stack([
+            gi[:, 0] / 20.0, gi[:, 1] / 18.0, gi[:, 2], gi[:, 3],
+            gi[:, 4] / 5.0, gi[:, 5] / 5.0,
+        ], dim=-1)
+        a_sc = obs["agent_scalars"].float()
+        # agent_scalars: life/20, hand_size/7, library_size/60, lands_played/5, max_lands/5, WUBRGC mana/5
+        a_norm = torch.stack([
+            a_sc[:, 0] / 20.0, a_sc[:, 1] / 7.0, a_sc[:, 2] / 60.0,
+            a_sc[:, 3] / 5.0, a_sc[:, 4] / 5.0,
+            a_sc[:, 5] / 5.0, a_sc[:, 6] / 5.0, a_sc[:, 7] / 5.0,
+            a_sc[:, 8] / 5.0, a_sc[:, 9] / 5.0, a_sc[:, 10] / 5.0,
+        ], dim=-1)
+        o_sc = obs["opponent_scalars"].float()
+        o_norm = torch.stack([
+            o_sc[:, 0] / 20.0, o_sc[:, 1] / 7.0, o_sc[:, 2] / 60.0,
+            o_sc[:, 3] / 5.0, o_sc[:, 4] / 5.0,
+            o_sc[:, 5] / 5.0, o_sc[:, 6] / 5.0, o_sc[:, 7] / 5.0,
+            o_sc[:, 8] / 5.0, o_sc[:, 9] / 5.0, o_sc[:, 10] / 5.0,
+        ], dim=-1)
+        scalars = torch.cat([gi_norm, a_norm, o_norm, obs["decision_type"].float()], dim=-1)
         scalar_enc = self.scalar_encoder(scalars)  # (batch, 64)
 
-        # Cards (7 zones, shared encoder, concatenated per-card)
-        card_encs = []
-        for zone in CARD_ZONES:
-            card_encs.append(self._encode_cards(obs[zone]))  # each (batch, zone_size * 16)
-        card_enc = torch.cat(card_encs, dim=-1)  # (batch, 1600)
+        # Cards: tokenize all zones, run cross-zone attention, mean pool
+        card_tokens, padding_mask = self._tokenize_cards(obs)  # (batch, 100, 64)
+        card_tokens = self.card_transformer(card_tokens, src_key_padding_mask=padding_mask)
+        # Mean pool over non-padding tokens
+        valid = (~padding_mask).float().unsqueeze(-1)  # (batch, 100, 1)
+        pooled = (card_tokens * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
+        card_enc = self.card_pool(pooled)  # (batch, 128)
 
         # Stack
         stack_enc = self._encode_stack(obs["stack"])  # (batch, 16)
 
         # Trunk
-        combined = torch.cat([scalar_enc, card_enc, stack_enc], dim=-1)  # (batch, 1680)
+        combined = torch.cat([scalar_enc, card_enc, stack_enc], dim=-1)  # (batch, 208)
         return self.trunk(combined)
 
     def get_value(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -232,8 +283,8 @@ class Agent(nn.Module):
     def _encode_actions(self, action_features: torch.Tensor) -> torch.Tensor:
         """Encode action features with shared card name embeddings.
 
-        action_features: (B, 256, 20) where indices 0 and 4 are raw name_ids.
-        Returns: (B, 256, 32) encoded actions.
+        action_features: (B, 256, 34) where indices 0 and 4 are raw name_ids.
+        Returns: (B, 256, action_dim) encoded actions.
         """
         af = action_features.float()
         # Embed source_name_id (index 0) and target_name_id (index 4)
@@ -242,12 +293,12 @@ class Agent(nn.Module):
         src_emb = self.card_name_embedding(src_name_ids)  # (B, 256, CARD_EMBED_DIM)
         tgt_emb = self.card_name_embedding(tgt_name_ids)  # (B, 256, CARD_EMBED_DIM)
 
-        # Other features: indices 1,2,3 + 5,6 + 7..19 (18 features)
-        other = torch.cat([af[:, :, 1:4], af[:, :, 5:7], af[:, :, 7:20]], dim=-1)  # (B, 256, 18)
+        # Other features: indices 1,2,3 + 5,6 + 7..33 (32 features)
+        other = torch.cat([af[:, :, 1:4], af[:, :, 5:7], af[:, :, 7:34]], dim=-1)  # (B, 256, 32)
 
-        # Concatenate: src_emb + other + tgt_emb
-        combined = torch.cat([src_emb, other, tgt_emb], dim=-1)  # (B, 256, 34)
-        return self.action_encoder(combined)  # (B, 256, 32)
+        # Concatenate: src_emb(64) + other(32) + tgt_emb(64) = 160
+        combined = torch.cat([src_emb, other, tgt_emb], dim=-1)
+        return self.action_encoder(combined)
 
     def get_action_and_value(
         self,
@@ -302,10 +353,6 @@ def obs_to_tensor(obs: dict[str, np.ndarray], device: torch.device) -> dict[str,
     """Convert a dict of numpy arrays to a dict of torch tensors."""
     return {k: torch.tensor(obs[k], device=device) for k in OBS_KEYS}
 
-
-def obs_to_tensor_float(obs: dict[str, np.ndarray], device: torch.device) -> dict[str, torch.Tensor]:
-    """Convert obs dict to tensors (used for single env step, adds batch dim)."""
-    return {k: torch.tensor(obs[k], device=device) for k in OBS_KEYS}
 
 
 # ---------------------------------------------------------------------------
@@ -476,8 +523,8 @@ class RewardShaping(gym.Wrapper):
             current_turn = int(obs["game_info"][0])
             if current_turn != self._prev_turn:
                 agent_bf = obs["agent_battlefield"]
-                # Count creatures: power >= 0 distinguishes creatures from lands/artifacts
-                num_creatures = int((agent_bf[:, 1] >= 0).sum())
+                # Count creatures using the is_creature type bit (index 16)
+                num_creatures = int((agent_bf[:, 16] > 0).sum())
                 reward += self.BOARD_SCALE * num_creatures
                 self._prev_turn = current_turn
 
@@ -572,7 +619,11 @@ def main():
     torch.manual_seed(args.seed)
     torch.backends.cudnn.deterministic = True
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu"
+    )
     print(f"Device: {device}")
 
     # Logging
@@ -655,11 +706,11 @@ def main():
     global_step = resume_global_step
     episode_count = resume_episode_count
     win_count = resume_win_count
-    recent_returns = []
-    recent_wins = []  # 1/0 per game, independent of reward shaping
-    recent_turns = []
-    recent_agent_life = []
-    recent_opp_life = []
+    recent_returns = deque(maxlen=1000)
+    recent_wins = deque(maxlen=1000)  # 1/0 per game, independent of reward shaping
+    recent_turns = deque(maxlen=1000)
+    recent_agent_life = deque(maxlen=1000)
+    recent_opp_life = deque(maxlen=1000)
 
     # Decision type & mulligan tracking (reset each update)
     decision_type_counts = Counter()
@@ -710,7 +761,7 @@ def main():
             # Step environment
             next_obs, reward, terminated, truncated, infos = envs.step(action.cpu().numpy())
             done = np.logical_or(terminated, truncated)
-            rewards[step] = torch.tensor(reward, device=device)
+            rewards[step] = torch.tensor(reward, dtype=torch.float32, device=device)
             next_done = torch.tensor(done, dtype=torch.float32, device=device)
 
             # Log completed episodes (Gymnasium v1.x uses "episode"/"_episode" keys)
@@ -834,17 +885,17 @@ def main():
         writer.add_scalar("charts/episodes", episode_count, global_step)
         writer.add_scalar("charts/SPS", sps, global_step)
 
-        # Smoothed game metrics (last 100 episodes)
+        # Smoothed game metrics (rolling window via deque maxlen)
         if recent_returns:
-            writer.add_scalar("charts/avg_return_100", np.mean(recent_returns[-100:]), global_step)
+            writer.add_scalar("charts/avg_return_1000", np.mean(recent_returns), global_step)
         if recent_wins:
-            writer.add_scalar("charts/win_rate_1000", np.mean(recent_wins[-1000:]), global_step)
+            writer.add_scalar("charts/win_rate_1000", np.mean(recent_wins), global_step)
         if recent_turns:
-            writer.add_scalar("charts/avg_turns_per_game_100", np.mean(recent_turns[-100:]), global_step)
+            writer.add_scalar("charts/avg_turns_per_game_1000", np.mean(recent_turns), global_step)
         if recent_agent_life:
-            writer.add_scalar("charts/avg_agent_life_at_end_100", np.mean(recent_agent_life[-100:]), global_step)
+            writer.add_scalar("charts/avg_agent_life_at_end_1000", np.mean(recent_agent_life), global_step)
         if recent_opp_life:
-            writer.add_scalar("charts/avg_opponent_life_at_end_100", np.mean(recent_opp_life[-100:]), global_step)
+            writer.add_scalar("charts/avg_opponent_life_at_end_1000", np.mean(recent_opp_life), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
@@ -890,7 +941,7 @@ def main():
         mulligan_events.clear()
 
         if update % 10 == 0 or update == 1:
-            avg_return = np.mean(recent_returns[-100:]) if recent_returns else 0.0
+            avg_return = np.mean(recent_returns) if recent_returns else 0.0
             print(
                 f"Update {update}/{num_updates} | "
                 f"Step {global_step:,} | "
