@@ -1,25 +1,31 @@
 package forge.research.observation;
 
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Maps card names to stable integer IDs for observation encoding.
- * Thread-safe. IDs are assigned incrementally on first encounter.
+ * Thread-safe. IDs are deterministic — derived from a hash of the card name,
+ * so they are consistent across JVM restarts and server processes.
+ *
+ * IDs are in range [1, VOCAB_SIZE-1]. ID 0 is reserved for padding.
  */
 public class CardRegistry {
 
     private static final CardRegistry INSTANCE = new CardRegistry();
+    private static final int VOCAB_SIZE = 4096;
 
     private final ConcurrentHashMap<String, Integer> nameToId = new ConcurrentHashMap<>();
-    private final AtomicInteger nextId = new AtomicInteger(1);
 
     public static CardRegistry getInstance() {
         return INSTANCE;
     }
 
     public int getNameId(String cardName) {
-        return nameToId.computeIfAbsent(cardName, k -> nextId.getAndIncrement());
+        return nameToId.computeIfAbsent(cardName, k -> {
+            // Deterministic hash mapped to [1, VOCAB_SIZE-1]
+            int hash = k.hashCode() & 0x7FFFFFFF; // ensure positive
+            return 1 + (hash % (VOCAB_SIZE - 1));
+        });
     }
 
     public int size() {

@@ -254,7 +254,7 @@ public class RlGameManager {
         } else {
             result.setIsDraw(false);
             result.setWinnerIndex(
-                    lastOutcome.isWinner(agentPlayer.getLobbyPlayer()) ? agentPlayer.getId() : opponentPlayer.getId());
+                    lastOutcome.isWinner(agentPlayer.getLobbyPlayer()) ? 0 : 1);
         }
         result.setWinCondition(lastOutcome.getWinCondition() != null
                 ? lastOutcome.getWinCondition().name() : "Unknown");
