@@ -22,7 +22,7 @@ NUM_TYPE_BITS = 7        # Creature, Land, Instant, Sorcery, Enchantment, Artifa
 NUM_KEYWORD_BITS = 14    # flying, first_strike, ..., flash
 # 12 scalar features + 5 colors + 7 types + 14 keywords = 38
 CARD_FEATURES = 38
-STACK_FEATURES = 2      # source_card_id, controller_index (trimmed dead features)
+STACK_FEATURES = 6      # source_name_id, controller, target_name_id, target_is_player, target_is_own, source_type
 MAX_ACTIONS = 256
 NUM_DECISION_TYPES = 15
 ACTION_FEATURES = 34    # 20 original + 14 source keyword bits
@@ -298,8 +298,12 @@ class ForgeRlEnv(gym.Env):
             if i >= MAX_STACK:
                 break
             mat[i] = [
-                entry.source_name_id,        # card identity (embeddable)
-                entry.controller_index,       # 0=agent, 1=opponent
+                entry.source_name_id,                           # card identity (embeddable)
+                entry.controller_index,                         # 0=agent, 1=opponent
+                entry.target_name_id,                           # target card identity (0=none/player)
+                1.0 if entry.target_is_player else 0.0,         # targeting a player?
+                1.0 if entry.target_is_own else 0.0,            # targeting own permanent?
+                entry.source_type_bitmask & 1,                  # is creature (for combat tricks)
             ]
         return mat
 

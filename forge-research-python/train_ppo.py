@@ -103,15 +103,17 @@ CARD_ZONES = [
     "agent_exile", "opponent_exile",
 ]
 CARD_FEATURES = 38  # 12 scalar + 5 colors + 7 types + 14 keywords
-STACK_FEATURES = 2  # source_name_id, controller_index (0=agent, 1=opponent)
+STACK_FEATURES = 6  # source_name_id, controller, target_name_id, target_is_player, target_is_own, source_type
 # Zone sizes (must match env.py)
 ZONE_SIZES = {"agent_hand": 10, "agent_battlefield": 20, "opponent_battlefield": 20,
               "agent_graveyard": 15, "opponent_graveyard": 15, "agent_exile": 10, "opponent_exile": 10}
 TOTAL_CARD_SLOTS = sum(ZONE_SIZES.values())  # 100
 CARD_VOCAB_SIZE = 4096  # max unique card names (name_id 0 reserved for padding)
 CARD_EMBED_DIM = 64     # learned embedding dimension per card name
+MAX_STACK = 10
 NUM_ZONES = len(CARD_ZONES)  # 7
-CARD_TOKEN_DIM = 64     # per-card token dimension fed into attention
+NUM_TOKEN_TYPES = NUM_ZONES + 1  # 7 card zones + 1 stack zone
+CARD_TOKEN_DIM = 64     # per-card/stack token dimension fed into attention
 ATTN_HEADS = 4
 ATTN_LAYERS = 2
 
@@ -136,8 +138,8 @@ class Agent(nn.Module):
         # Card name embedding (name_id → learned vector)
         self.card_name_embedding = nn.Embedding(CARD_VOCAB_SIZE, CARD_EMBED_DIM, padding_idx=0)
 
-        # Zone embedding: learned vector per zone, added to each card token
-        self.zone_embedding = nn.Embedding(NUM_ZONES, CARD_TOKEN_DIM)
+        # Token type embedding: 7 card zones + 1 stack zone
+        self.token_type_embedding = nn.Embedding(NUM_TOKEN_TYPES, CARD_TOKEN_DIM)
 
         # Card projection: raw features → token dim for attention
         card_input_dim = CARD_EMBED_DIM + CARD_FEATURES - 1  # 64 + 37 = 101
@@ -146,7 +148,18 @@ class Agent(nn.Module):
             nn.ReLU(),
         )
 
-        # Cross-zone transformer: self-attention over all card tokens
+        # Stack projection: stack features → token dim (with name embeddings for source + target)
+        # source_name_emb(64) + target_name_emb(64) + 4 other features = 132
+        stack_proj_input = 2 * CARD_EMBED_DIM + (STACK_FEATURES - 2)  # 2 name_ids embedded, 4 others raw
+        self.stack_proj = nn.Sequential(
+            layer_init(nn.Linear(stack_proj_input, CARD_TOKEN_DIM)),
+            nn.ReLU(),
+        )
+
+        # Stack positional encoding: position 0 = top of stack (resolves next)
+        self.stack_pos_encoding = nn.Embedding(MAX_STACK, CARD_TOKEN_DIM)
+
+        # Cross-zone transformer: self-attention over all card + stack tokens
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=CARD_TOKEN_DIM,
             nhead=ATTN_HEADS,
@@ -156,12 +169,6 @@ class Agent(nn.Module):
             batch_first=True,
         )
         self.card_transformer = nn.TransformerEncoder(encoder_layer, num_layers=ATTN_LAYERS)
-
-        # Stack encoder
-        self.stack_encoder = nn.Sequential(
-            layer_init(nn.Linear(STACK_FEATURES, 16)),
-            nn.ReLU(),
-        )
 
         # --- Actor: actions cross-attend to card tokens ---
         # Action projection: raw action features → same dim as card tokens
@@ -180,39 +187,44 @@ class Agent(nn.Module):
         )
         self.action_cross_attn_norm = nn.LayerNorm(CARD_TOKEN_DIM)
 
-        # Action scoring head: cross_attn_output(64) + scalar(64) + stack(16) = 144 → 1
-        context_dim = scalar_dim + 16  # 80
+        # Action scoring head: cross_attn_output(64) + scalar(64) = 128 → 1
         self.action_score = nn.Sequential(
-            layer_init(nn.Linear(CARD_TOKEN_DIM + context_dim, 128)),
+            layer_init(nn.Linear(CARD_TOKEN_DIM + scalar_dim, 128)),
             nn.ReLU(),
             layer_init(nn.Linear(128, 1), std=0.01),
         )
 
-        # --- Critic: pooled board state → value ---
-        card_pool_dim = 128
-        self.card_pool = nn.Sequential(
-            layer_init(nn.Linear(CARD_TOKEN_DIM, card_pool_dim)),
-            nn.ReLU(),
+        # --- Critic: learned query cross-attends to card tokens → value ---
+        # CLS-style learnable query: "what is this board worth?"
+        self.value_query = nn.Parameter(torch.randn(1, 1, CARD_TOKEN_DIM) * 0.02)
+        self.value_cross_attn = nn.MultiheadAttention(
+            embed_dim=CARD_TOKEN_DIM,
+            num_heads=ATTN_HEADS,
+            dropout=0.0,
+            batch_first=True,
         )
-        critic_trunk_input = scalar_dim + card_pool_dim + 16  # 64 + 128 + 16 = 208
-        self.critic_trunk = nn.Sequential(
-            layer_init(nn.Linear(critic_trunk_input, 512)),
-            nn.ReLU(),
-            layer_init(nn.Linear(512, 256)),
-            nn.ReLU(),
-        )
-        self.critic = layer_init(nn.Linear(256, 1), std=1.0)
+        self.value_cross_attn_norm = nn.LayerNorm(CARD_TOKEN_DIM)
 
-    def _tokenize_cards(self, obs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
-        """Build card tokens from all zones with zone embeddings.
+        # Value head: cross_attn_output(64) + scalar(64) = 128
+        self.critic_trunk = nn.Sequential(
+            layer_init(nn.Linear(CARD_TOKEN_DIM + scalar_dim, 256)),
+            nn.ReLU(),
+            layer_init(nn.Linear(256, 128)),
+            nn.ReLU(),
+        )
+        self.critic = layer_init(nn.Linear(128, 1), std=1.0)
+
+    def _tokenize_board(self, obs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Build card + stack tokens with type embeddings and stack positional encoding.
 
         Returns:
-            tokens: (batch, TOTAL_CARD_SLOTS, CARD_TOKEN_DIM)
-            key_padding_mask: (batch, TOTAL_CARD_SLOTS) — True for padding slots
+            tokens: (batch, TOTAL_CARD_SLOTS + MAX_STACK, CARD_TOKEN_DIM)
+            key_padding_mask: (batch, TOTAL_CARD_SLOTS + MAX_STACK) — True for padding slots
         """
         all_tokens = []
         all_masks = []
 
+        # Card zone tokens (7 zones)
         for zone_idx, zone in enumerate(CARD_ZONES):
             card_matrix = obs[zone]  # (batch, zone_size, CARD_FEATURES)
 
@@ -226,8 +238,8 @@ class Agent(nn.Module):
             card_input = torch.cat([name_emb, other_features], dim=-1)
             tokens = self.card_proj(card_input)  # (batch, zone_size, CARD_TOKEN_DIM)
 
-            # Add zone embedding
-            tokens = tokens + self.zone_embedding.weight[zone_idx]
+            # Add token type embedding (zone_idx for card zones)
+            tokens = tokens + self.token_type_embedding.weight[zone_idx]
 
             # Zero out padding tokens
             tokens = tokens * (~is_padding).float().unsqueeze(-1)
@@ -235,16 +247,32 @@ class Agent(nn.Module):
             all_tokens.append(tokens)
             all_masks.append(is_padding)
 
-        return torch.cat(all_tokens, dim=1), torch.cat(all_masks, dim=1)
+        # Stack tokens (with positional encoding)
+        stack_matrix = obs["stack"]  # (batch, MAX_STACK, STACK_FEATURES)
+        is_padding = stack_matrix[:, :, 0] < 0  # (batch, MAX_STACK)
 
-    def _encode_stack(self, stack_matrix: torch.Tensor) -> torch.Tensor:
-        """Encode stack entries with mean pooling."""
-        valid = (stack_matrix[:, :, 0] >= 0).float().unsqueeze(-1)
-        encoded = self.stack_encoder(stack_matrix.float())
-        encoded = encoded * valid
-        count = valid.sum(dim=1).clamp(min=1)
-        pooled = encoded.sum(dim=1) / count
-        return pooled
+        # Embed source_name_id (feature 0) and target_name_id (feature 2)
+        src_name_ids = stack_matrix[:, :, 0].long().clamp(min=0, max=CARD_VOCAB_SIZE - 1)
+        tgt_name_ids = stack_matrix[:, :, 2].long().clamp(min=0, max=CARD_VOCAB_SIZE - 1)
+        src_emb = self.card_name_embedding(src_name_ids)  # (batch, MAX_STACK, 64)
+        tgt_emb = self.card_name_embedding(tgt_name_ids)  # (batch, MAX_STACK, 64)
+        other_features = stack_matrix[:, :, [1, 3, 4, 5]].float()  # controller, target_is_player, target_is_own, source_type
+
+        stack_input = torch.cat([src_emb, tgt_emb, other_features], dim=-1)  # (batch, MAX_STACK, 132)
+        stack_tokens = self.stack_proj(stack_input)  # (batch, MAX_STACK, CARD_TOKEN_DIM)
+
+        # Add stack zone type embedding + positional encoding
+        stack_type_idx = NUM_ZONES  # index 7 = stack zone
+        positions = torch.arange(MAX_STACK, device=stack_matrix.device)
+        stack_tokens = stack_tokens + self.token_type_embedding.weight[stack_type_idx] + self.stack_pos_encoding(positions)
+
+        # Zero out padding
+        stack_tokens = stack_tokens * (~is_padding).float().unsqueeze(-1)
+
+        all_tokens.append(stack_tokens)
+        all_masks.append(is_padding)
+
+        return torch.cat(all_tokens, dim=1), torch.cat(all_masks, dim=1)
 
     def _normalize_scalars(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         """Normalize and concatenate scalar observations."""
@@ -270,15 +298,14 @@ class Agent(nn.Module):
         return torch.cat([gi_norm, a_norm, o_norm, obs["decision_type"].float()], dim=-1)
 
     def _encode_board(self, obs: dict[str, torch.Tensor]):
-        """Encode the full board state. Returns scalar_enc, card_tokens, card_mask, stack_enc."""
+        """Encode the full board state. Returns scalar_enc, board_tokens, board_mask."""
         scalar_enc = self.scalar_encoder(self._normalize_scalars(obs))  # (B, 64)
 
-        card_tokens, card_mask = self._tokenize_cards(obs)  # (B, 100, 64), (B, 100)
-        card_tokens = self.card_transformer(card_tokens, src_key_padding_mask=card_mask)
+        # Unified card + stack tokens through shared transformer
+        board_tokens, board_mask = self._tokenize_board(obs)  # (B, 110, 64), (B, 110)
+        board_tokens = self.card_transformer(board_tokens, src_key_padding_mask=board_mask)
 
-        stack_enc = self._encode_stack(obs["stack"])  # (B, 16)
-
-        return scalar_enc, card_tokens, card_mask, stack_enc
+        return scalar_enc, board_tokens, board_mask
 
     def _encode_actions(self, action_features: torch.Tensor) -> torch.Tensor:
         """Encode raw action features into action tokens.
@@ -297,53 +324,63 @@ class Agent(nn.Module):
         combined = torch.cat([src_emb, other, tgt_emb], dim=-1)  # (B, 256, 160)
         return self.action_proj(combined)  # (B, 256, 64)
 
-    def get_value(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
-        scalar_enc, card_tokens, card_mask, stack_enc = self._encode_board(obs)
+    def _compute_value(self, scalar_enc, board_tokens, board_mask):
+        """Critic: learned query cross-attends to board tokens (cards + stack)."""
+        batch_size = scalar_enc.shape[0]
 
-        # Mean pool card tokens for critic
-        valid = (~card_mask).float().unsqueeze(-1)
-        pooled = (card_tokens * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
-        card_enc = self.card_pool(pooled)  # (B, 128)
+        # Expand CLS query to batch size
+        query = self.value_query.expand(batch_size, -1, -1)  # (B, 1, 64)
 
-        combined = torch.cat([scalar_enc, card_enc, stack_enc], dim=-1)  # (B, 208)
+        # Safe mask for cross-attention
+        safe_mask = board_mask.clone()
+        all_masked = board_mask.all(dim=1)
+        if all_masked.any():
+            safe_mask[all_masked, 0] = False
+
+        attn_out, _ = self.value_cross_attn(
+            query=query, key=board_tokens, value=board_tokens,
+            key_padding_mask=safe_mask,
+        )  # (B, 1, 64)
+        board_repr = self.value_cross_attn_norm(query + attn_out).squeeze(1)  # (B, 64)
+
+        # Concat with scalar context and score
+        combined = torch.cat([board_repr, scalar_enc], dim=-1)  # (B, 128)
         return self.critic(self.critic_trunk(combined))
+
+    def get_value(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
+        scalar_enc, board_tokens, board_mask = self._encode_board(obs)
+        return self._compute_value(scalar_enc, board_tokens, board_mask)
 
     def get_action_and_value(
         self,
         obs: dict[str, torch.Tensor],
         action: Optional[torch.Tensor] = None,
     ):
-        scalar_enc, card_tokens, card_mask, stack_enc = self._encode_board(obs)
+        scalar_enc, board_tokens, board_mask = self._encode_board(obs)
 
-        # --- Actor: actions cross-attend to board ---
+        # --- Actor: actions cross-attend to board (cards + stack) ---
         action_tokens = self._encode_actions(obs["action_features"])  # (B, 256, 64)
 
-        # Cross-attention: actions query the card tokens
-        # Ensure at least one key is unmasked to prevent NaN from all-masked softmax
-        safe_mask = card_mask.clone()
-        all_masked = card_mask.all(dim=1)  # (B,)
+        # Cross-attention: actions query the board tokens
+        safe_mask = board_mask.clone()
+        all_masked = board_mask.all(dim=1)  # (B,)
         if all_masked.any():
             safe_mask[all_masked, 0] = False
         attn_out, _ = self.action_card_cross_attn(
             query=action_tokens,
-            key=card_tokens,
-            value=card_tokens,
+            key=board_tokens,
+            value=board_tokens,
             key_padding_mask=safe_mask,
         )  # (B, 256, 64)
         action_repr = self.action_cross_attn_norm(action_tokens + attn_out)  # residual + norm
 
         # Broadcast scalar context to each action and score
-        context = torch.cat([scalar_enc, stack_enc], dim=-1)  # (B, 80)
-        context_expanded = context.unsqueeze(1).expand(-1, 256, -1)  # (B, 256, 80)
-        score_input = torch.cat([action_repr, context_expanded], dim=-1)  # (B, 256, 144)
+        scalar_expanded = scalar_enc.unsqueeze(1).expand(-1, 256, -1)  # (B, 256, 64)
+        score_input = torch.cat([action_repr, scalar_expanded], dim=-1)  # (B, 256, 128)
         logits = self.action_score(score_input).squeeze(-1)  # (B, 256)
 
-        # --- Critic: pooled board → value ---
-        valid = (~card_mask).float().unsqueeze(-1)
-        pooled = (card_tokens * valid).sum(dim=1) / valid.sum(dim=1).clamp(min=1)
-        card_enc = self.card_pool(pooled)  # (B, 128)
-        critic_input = torch.cat([scalar_enc, card_enc, stack_enc], dim=-1)  # (B, 208)
-        value = self.critic(self.critic_trunk(critic_input))
+        # --- Critic: learned query cross-attends to board ---
+        value = self._compute_value(scalar_enc, board_tokens, board_mask)
 
         mask = obs["action_mask"]
         dist = CategoricalMasked(logits, mask)

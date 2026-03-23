@@ -262,7 +262,13 @@ def _stack_matrix(stack_entries) -> np.ndarray:
     for i, entry in enumerate(stack_entries):
         if i >= 10:
             break
-        mat[i] = [entry.source_name_id, entry.controller_index]
+        mat[i] = [
+            entry.source_name_id, entry.controller_index,
+            entry.target_name_id,
+            1.0 if entry.target_is_player else 0.0,
+            1.0 if entry.target_is_own else 0.0,
+            entry.source_type_bitmask & 1,
+        ]
     return mat
 
 

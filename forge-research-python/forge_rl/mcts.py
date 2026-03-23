@@ -122,21 +122,20 @@ class MCTSAgent:
             action, _, _, value = self.agent.get_action_and_value(obs_t)
 
             # Get raw logits for policy priors
-            # Re-run trunk and action encoding to get logits
-            scalar_enc, card_tokens, card_mask, stack_enc = self.agent._encode_board(obs_t)
+            # Re-run board encoding and action scoring to get logits
+            scalar_enc, board_tokens, board_mask = self.agent._encode_board(obs_t)
             action_tokens = self.agent._encode_actions(obs_t["action_features"])
-            safe_mask = card_mask.clone()
-            all_masked = card_mask.all(dim=1)
+            safe_mask = board_mask.clone()
+            all_masked = board_mask.all(dim=1)
             if all_masked.any():
                 safe_mask[all_masked, 0] = False
             attn_out, _ = self.agent.action_card_cross_attn(
-                query=action_tokens, key=card_tokens, value=card_tokens,
+                query=action_tokens, key=board_tokens, value=board_tokens,
                 key_padding_mask=safe_mask,
             )
             action_repr = self.agent.action_cross_attn_norm(action_tokens + attn_out)
-            context = torch.cat([scalar_enc, stack_enc], dim=-1)
-            context_expanded = context.unsqueeze(1).expand(-1, 256, -1)
-            score_input = torch.cat([action_repr, context_expanded], dim=-1)
+            scalar_expanded = scalar_enc.unsqueeze(1).expand(-1, 256, -1)
+            score_input = torch.cat([action_repr, scalar_expanded], dim=-1)
             logits = self.agent.action_score(score_input).squeeze(-1)  # (1, 256)
 
             # Apply mask and softmax to get priors
@@ -300,5 +299,11 @@ class MCTSAgent:
         for i, entry in enumerate(stack_entries):
             if i >= MAX_STACK:
                 break
-            mat[i] = [entry.source_name_id, entry.controller_index]
+            mat[i] = [
+                entry.source_name_id, entry.controller_index,
+                entry.target_name_id,
+                1.0 if entry.target_is_player else 0.0,
+                1.0 if entry.target_is_own else 0.0,
+                entry.source_type_bitmask & 1,
+            ]
         return mat

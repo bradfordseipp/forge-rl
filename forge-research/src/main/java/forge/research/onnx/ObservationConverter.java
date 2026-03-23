@@ -19,7 +19,7 @@ public class ObservationConverter {
 
     // 12 scalar + 5 colors + 7 types + 14 keywords = 38
     private static final int CARD_FEATURES = 38;
-    private static final int STACK_FEATURES = 2;
+    private static final int STACK_FEATURES = 6;
     private static final int MAX_HAND = 10;
     private static final int MAX_BATTLEFIELD = 20;
     private static final int MAX_GRAVEYARD = 15;
@@ -108,6 +108,10 @@ public class ObservationConverter {
             int base = i * STACK_FEATURES;
             mat[base]     = e.getSourceNameId();
             mat[base + 1] = e.getControllerIndex();
+            mat[base + 2] = e.getTargetNameId();
+            mat[base + 3] = e.getTargetIsPlayer() ? 1f : 0f;
+            mat[base + 4] = e.getTargetIsOwn() ? 1f : 0f;
+            mat[base + 5] = e.getSourceTypeBitmask() & 1;
         }
         return mat;
     }

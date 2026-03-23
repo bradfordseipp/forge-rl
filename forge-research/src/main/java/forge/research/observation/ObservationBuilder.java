@@ -194,10 +194,27 @@ public class ObservationBuilder {
         entry.setSourceCardId(source.getId());
         entry.setSourceCardName(source.getName());
         entry.setSourceNameId(cardRegistry.getNameId(source.getName()));
+        entry.setSourceTypeBitmask(computeTypeBitmask(source));
         entry.setDescription(si.getStackDescription());
         Player controller = si.getActivatingPlayer();
         // Logical index: 0 = agent, 1 = opponent
         entry.setControllerIndex(controller != null ? (controller == agent ? 0 : 1) : -1);
+
+        // Target information
+        forge.game.spellability.TargetChoices targets = si.getTargetChoices();
+        if (targets != null && !targets.isEmpty()) {
+            forge.game.GameObject firstTarget = targets.get(0);
+            if (firstTarget instanceof forge.game.player.Player) {
+                entry.setTargetIsPlayer(true);
+                entry.setTargetIsOwn(firstTarget == controller);
+            } else if (firstTarget instanceof Card) {
+                Card targetCard = (Card) firstTarget;
+                entry.setTargetNameId(cardRegistry.getNameId(targetCard.getName()));
+                entry.setTargetIsPlayer(false);
+                Player targetController = targetCard.getController();
+                entry.setTargetIsOwn(targetController != null && targetController == controller);
+            }
+        }
         return entry.build();
     }
 

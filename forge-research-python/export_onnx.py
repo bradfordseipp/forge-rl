@@ -81,21 +81,20 @@ class AgentOnnxWrapper(nn.Module):
             "action_features": action_features.float(),
         }
 
-        scalar_enc, card_tokens, card_mask, stack_enc = self.agent._encode_board(obs)
+        scalar_enc, board_tokens, board_mask = self.agent._encode_board(obs)
 
         # Action encoding and cross-attention scoring (matches get_action_and_value)
         action_tokens = self.agent._encode_actions(obs["action_features"])
         # Always unmask first slot to prevent NaN (safe for ONNX tracing — no conditional)
-        safe_mask = card_mask.clone()
+        safe_mask = board_mask.clone()
         safe_mask[:, 0] = False
         attn_out, _ = self.agent.action_card_cross_attn(
-            query=action_tokens, key=card_tokens, value=card_tokens,
+            query=action_tokens, key=board_tokens, value=board_tokens,
             key_padding_mask=safe_mask,
         )
         action_repr = self.agent.action_cross_attn_norm(action_tokens + attn_out)
-        context = torch.cat([scalar_enc, stack_enc], dim=-1)
-        context_expanded = context.unsqueeze(1).expand(-1, 256, -1)
-        score_input = torch.cat([action_repr, context_expanded], dim=-1)
+        scalar_expanded = scalar_enc.unsqueeze(1).expand(-1, 256, -1)
+        score_input = torch.cat([action_repr, scalar_expanded], dim=-1)
         logits = self.agent.action_score(score_input).squeeze(-1)
 
         return logits

@@ -129,6 +129,11 @@ message StackEntry {
     int32 controller_index = 3;
     string source_card_name = 4;
     int32 source_name_id = 5;
+    // Target information
+    int32 target_name_id = 6;           // name_id of target card (0 if targeting player or no target)
+    bool target_is_player = 7;          // true if targeting a player
+    bool target_is_own = 8;             // true if target belongs to the caster
+    int32 source_type_bitmask = 9;      // same encoding as CardState.type_bitmask
 }
 
 message CombatState {
