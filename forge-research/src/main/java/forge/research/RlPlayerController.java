@@ -971,8 +971,7 @@ public class RlPlayerController extends PlayerControllerAi {
     }
 
     @Override
-    public CardCollectionView tuckCardsViaMulligan(Player mulliganingPlayer, int cardsToReturn) {
-        CardCollection hand = new CardCollection(player.getCardsIn(ZoneType.Hand));
+    public CardCollectionView tuckCardsViaMulligan(CardCollectionView hand, int cardsToReturn) {
         return queryAgentMultiSelect(new ArrayList<>(hand),
                 "Choose cards to put on bottom of library",
                 DecisionType.CHOOSE_CARDS, cardsToReturn, cardsToReturn);
@@ -1282,7 +1281,7 @@ public class RlPlayerController extends PlayerControllerAi {
      * If the hand has cards of the matching type, the agent can choose one to reveal instead of discarding.
      */
     @Override
-    public CardCollectionView chooseCardsToDiscardUnlessType(int min, CardCollectionView hand, String param, SpellAbility sa) {
+    public CardCollectionView chooseCardsToDiscardUnlessType(int min, CardCollectionView hand, String[] unlessTypes, SpellAbility sa) {
         if (hand.isEmpty()) {
             return new CardCollection();
         }
@@ -1290,7 +1289,7 @@ public class RlPlayerController extends PlayerControllerAi {
         // Offer the agent a choice: reveal a matching card, or discard
         // Build list of all cards in hand as options
         DecisionPoint.Builder dp = baseDecision(DecisionType.CHOOSE_CARDS,
-                "Discard " + min + " card(s) unless you reveal a " + param);
+                "Discard " + min + " card(s) unless you reveal a " + String.join("/", unlessTypes));
         dp.setMinSelections(1);
         dp.setMaxSelections(1);
 
@@ -1309,7 +1308,7 @@ public class RlPlayerController extends PlayerControllerAi {
         Card chosen = allCards.get(choice);
 
         // Check if the chosen card matches the required type
-        String[] restrictions = param.split(",");
+        String[] restrictions = unlessTypes;
         boolean matches = chosen.isValid(restrictions, sa.getActivatingPlayer(), sa.getHostCard(), sa);
 
         if (matches) {

@@ -377,10 +377,10 @@ public class LoggingPlayerControllerHuman extends PlayerControllerHuman {
 
     @Override
     public CardCollectionView chooseCardsToDiscardUnlessType(int num, CardCollectionView hand,
-            String param, SpellAbility sa) {
-        CardCollectionView result = super.chooseCardsToDiscardUnlessType(num, hand, param, sa);
+            String[] unlessTypes, SpellAbility sa) {
+        CardCollectionView result = super.chooseCardsToDiscardUnlessType(num, hand, unlessTypes, sa);
         logCardSelection("CHOOSE_CARDS_DISCARD_UNLESS",
-                "Discard " + num + " card(s) unless you reveal a " + param,
+                "Discard " + num + " card(s) unless you reveal a " + String.join("/", unlessTypes),
                 hand, result);
         return result;
     }
@@ -783,9 +783,8 @@ public class LoggingPlayerControllerHuman extends PlayerControllerHuman {
     // ═══════════════════════════════════════════════════════════════
 
     @Override
-    public CardCollectionView tuckCardsViaMulligan(Player mulliganingPlayer, int cardsToReturn) {
-        CardCollectionView result = super.tuckCardsViaMulligan(mulliganingPlayer, cardsToReturn);
-        CardCollectionView hand = new CardCollection(player.getCardsIn(ZoneType.Hand));
+    public CardCollectionView tuckCardsViaMulligan(CardCollectionView hand, int cardsToReturn) {
+        CardCollectionView result = super.tuckCardsViaMulligan(hand, cardsToReturn);
         logCardSelection("TUCK_MULLIGAN",
                 "Choose " + cardsToReturn + " card(s) to put on bottom of library",
                 hand, result);
