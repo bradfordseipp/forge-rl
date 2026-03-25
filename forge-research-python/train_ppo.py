@@ -13,6 +13,7 @@ from typing import Optional
 
 import gymnasium as gym
 import numpy as np
+from forge_rl.threaded_vec_env import ThreadedVecEnv
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -723,13 +724,14 @@ def main():
                                  deck_paths=[args.deck_a, args.deck_b], log_dir=log_dir)
     atexit.register(stop_servers, server_procs)
 
-    # Create vectorized environment
-    envs = gym.vector.SyncVectorEnv([
+    # Create vectorized environment (threaded for parallel gRPC)
+    env_fns = [
         make_env(args.server_base_port + i, args.deck_a, args.deck_b, args.seed + i,
                  agent_player_index=agent_player_index, opponent_model_path=opponent_model_path,
                  no_reward_shaping=args.no_reward_shaping)
         for i in range(args.num_envs)
-    ])
+    ]
+    envs = ThreadedVecEnv(env_fns)
 
     # Agent
     agent = Agent().to(device)
@@ -742,7 +744,14 @@ def main():
     resume_episode_count = 0
     resume_win_count = 0
     if args.resume:
-        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        resume_path = args.resume
+        # Allow passing a run name or directory — resolve to agent_latest.pt
+        if os.path.isdir(resume_path):
+            resume_path = os.path.join(resume_path, "agent_latest.pt")
+        elif not os.path.exists(resume_path) and not resume_path.endswith(".pt"):
+            # Bare run name like "run_mirror_mono_red_v1"
+            resume_path = f"runs/{resume_path}/agent_latest.pt"
+        ckpt = torch.load(resume_path, map_location=device, weights_only=False)
         if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
             agent.load_state_dict(ckpt["model_state_dict"])
             optimizer.load_state_dict(ckpt["optimizer_state_dict"])
@@ -750,11 +759,11 @@ def main():
             resume_global_step = ckpt["global_step"]
             resume_episode_count = ckpt["episode_count"]
             resume_win_count = ckpt["win_count"]
-            print(f"Resumed from {args.resume} (update {ckpt['update']}, step {resume_global_step:,})")
+            print(f"Resumed from {resume_path} (update {ckpt['update']}, step {resume_global_step:,})")
         else:
             # Legacy checkpoint (just state_dict)
             agent.load_state_dict(ckpt if isinstance(ckpt, dict) else ckpt)
-            print(f"Loaded weights from {args.resume} (legacy format, starting from update 1)")
+            print(f"Loaded weights from {resume_path} (legacy format, starting from update 1)")
 
     # Rollout storage (numpy dicts for obs, tensors for the rest)
     obs_buf = {
@@ -781,6 +790,7 @@ def main():
     recent_turns = deque(maxlen=1000)
     recent_agent_life = deque(maxlen=1000)
     recent_opp_life = deque(maxlen=1000)
+    recent_ep_lengths = deque(maxlen=1000)
 
     # Decision type & mulligan tracking (reset each update)
     decision_type_counts = Counter()
@@ -854,6 +864,7 @@ def main():
                             win_count += 1
                         recent_wins.append(1 if won else 0)
 
+                        recent_ep_lengths.append(ep_length)
                         writer.add_scalar("charts/episodic_return", ep_return, global_step)
                         writer.add_scalar("charts/episodic_length", ep_length, global_step)
 
@@ -870,6 +881,10 @@ def main():
                             turns = int(infos["game_result"]["turns_played"][i])
                             recent_turns.append(turns)
                             writer.add_scalar("charts/turns_per_game", turns, global_step)
+
+        # Count terminal states in this batch
+        batch_terminals = int(dones.sum().item())
+        writer.add_scalar("charts/batch_terminals", batch_terminals, global_step)
 
         # --- GAE ---
         with torch.no_grad():
@@ -966,6 +981,8 @@ def main():
             writer.add_scalar("charts/avg_agent_life_at_end_1000", np.mean(recent_agent_life), global_step)
         if recent_opp_life:
             writer.add_scalar("charts/avg_opponent_life_at_end_1000", np.mean(recent_opp_life), global_step)
+        if recent_ep_lengths:
+            writer.add_scalar("charts/avg_steps_per_game_1000", np.mean(recent_ep_lengths), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
@@ -1024,30 +1041,41 @@ def main():
                 f"Entropy {entropy_loss.item():.4f}"
             )
 
-        # Periodic checkpoint every 50 updates
-        if update % 50 == 0:
-            ckpt_path = f"runs/{args.run_name}/agent.pt"
-            torch.save({
+        # Periodic checkpoint every 25 updates
+        if update % 25 == 0:
+            run_dir = f"runs/{args.run_name}"
+            ckpt_data = {
                 "model_state_dict": agent.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "global_step": global_step,
                 "update": update,
                 "episode_count": episode_count,
                 "win_count": win_count,
-            }, ckpt_path)
-            print(f"  Checkpoint saved to {ckpt_path} (update {update})")
+            }
+            # Always overwrite latest
+            latest_path = f"{run_dir}/agent_latest.pt"
+            torch.save(ckpt_data, latest_path)
+            # Versioned checkpoint every 100 updates
+            if update % 100 == 0:
+                versioned_path = f"{run_dir}/agent_update_{update}.pt"
+                torch.save(ckpt_data, versioned_path)
+                print(f"  Checkpoint saved: {latest_path} + {versioned_path} (update {update})")
+            else:
+                print(f"  Checkpoint saved: {latest_path} (update {update})")
 
     # Save final model
-    model_path = f"runs/{args.run_name}/agent.pt"
-    torch.save({
+    run_dir = f"runs/{args.run_name}"
+    final_data = {
         "model_state_dict": agent.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "global_step": global_step,
         "update": update,
         "episode_count": episode_count,
         "win_count": win_count,
-    }, model_path)
-    print(f"Model saved to {model_path}")
+    }
+    for path in [f"{run_dir}/agent_latest.pt", f"{run_dir}/agent_final.pt"]:
+        torch.save(final_data, path)
+    print(f"Final model saved to {run_dir}/agent_final.pt")
 
     envs.close()
     writer.close()

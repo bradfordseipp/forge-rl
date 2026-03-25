@@ -24,7 +24,16 @@ public class CardRegistry {
         return nameToId.computeIfAbsent(cardName, k -> {
             // Deterministic hash mapped to [1, VOCAB_SIZE-1]
             int hash = k.hashCode() & 0x7FFFFFFF; // ensure positive
-            return 1 + (hash % (VOCAB_SIZE - 1));
+            int id = 1 + (hash % (VOCAB_SIZE - 1));
+            // Check for hash collisions
+            for (var entry : nameToId.entrySet()) {
+                if (entry.getValue() == id && !entry.getKey().equals(k)) {
+                    System.err.println("[CardRegistry] COLLISION: '" + k + "' and '" +
+                        entry.getKey() + "' both map to ID " + id +
+                        " (vocab size " + VOCAB_SIZE + ", " + nameToId.size() + " cards registered)");
+                }
+            }
+            return id;
         });
     }
 
