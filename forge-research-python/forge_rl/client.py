@@ -38,16 +38,23 @@ class ForgeRlClient:
         request = forge_rl_pb2.StepRequest(action_index=action_index)
         return self.stub.Step(request)
 
-    def simulate(self, first_action_index: int, max_agent_decisions: int = 3):
+    def simulate(self, first_action_index: int, max_agent_decisions: int = 3,
+                 randomize_hidden: bool = False):
         """Run an MCTS simulation from the current game state.
 
         Clones the game, takes first_action_index, then runs forward using
         the ONNX model for up to max_agent_decisions agent decisions.
+
+        If randomize_hidden=True (ISMCTS), the opponent's hand is shuffled
+        into their library and redealt before simulation, removing perfect
+        information about hidden cards.
+
         Returns SimulateResponse with leaf observation and terminal info.
         """
         request = forge_rl_pb2.SimulateRequest(
             first_action_index=first_action_index,
             max_agent_decisions=max_agent_decisions,
+            randomize_hidden=randomize_hidden,
         )
         return self.stub.Simulate(request)
 

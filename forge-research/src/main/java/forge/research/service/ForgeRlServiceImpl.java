@@ -82,7 +82,8 @@ public class ForgeRlServiceImpl extends ForgeRlServiceGrpc.ForgeRlServiceImplBas
         try {
             RlGameManager.SimulationResult result = gameManager.simulate(
                     request.getFirstActionIndex(),
-                    request.getMaxAgentDecisions());
+                    request.getMaxAgentDecisions(),
+                    request.getRandomizeHidden());
 
             SimulateResponse.Builder response = SimulateResponse.newBuilder();
             response.setLeafObservation(result.leafObservation);

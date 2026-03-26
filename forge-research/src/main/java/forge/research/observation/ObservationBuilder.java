@@ -91,7 +91,9 @@ public class ObservationBuilder {
         }
 
         for (Card c : p.getCardsIn(ZoneType.Exile)) {
-            state.addExile(buildCardState(c, p));
+            CardState.Builder exileCard = buildCardState(c, p).toBuilder();
+            exileCard.setIsPlayableFromExile(!c.mayPlay(p).isEmpty());
+            state.addExile(exileCard.build());
         }
 
         return state.build();

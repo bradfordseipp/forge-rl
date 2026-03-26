@@ -116,6 +116,8 @@ message CardState {
     int32 keyword_bitmask = 22;
     // Count of +1/+1 counters specifically (most strategically relevant)
     int32 plus_one_counter_count = 23;
+    // True if this card is in exile but can currently be played (impulse draw)
+    bool is_playable_from_exile = 24;
 }
 
 message CounterState {
@@ -206,6 +208,9 @@ message ActionOption {
 
     // Effect metadata
     int32 damage_amount = 21;
+
+    // Source zone: 0=hand, 1=battlefield, 2=graveyard, 3=exile, -1=unknown
+    int32 source_zone = 22;
 }
 
 // ─── MCTS Simulation ────────────────────────────────────────
@@ -213,6 +218,7 @@ message ActionOption {
 message SimulateRequest {
     int32 first_action_index = 1;       // action to take from current state
     int32 max_agent_decisions = 2;      // how many agent decisions to simulate forward
+    bool randomize_hidden = 3;          // ISMCTS: randomize opponent hand before simulation
 }
 
 message SimulateResponse {

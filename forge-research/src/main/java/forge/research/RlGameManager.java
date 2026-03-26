@@ -2,6 +2,7 @@ package forge.research;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.concurrent.SynchronousQueue;
@@ -21,8 +22,11 @@ import forge.game.GameOutcome;
 import forge.game.GameRules;
 import forge.game.GameType;
 import forge.game.Match;
+import forge.game.card.Card;
 import forge.game.player.Player;
 import forge.game.player.RegisteredPlayer;
+import forge.game.zone.Zone;
+import forge.game.zone.ZoneType;
 import forge.research.observation.ObservationBuilder;
 import forge.research.onnx.OnnxInferenceEngine;
 import forge.research.proto.GameResult;
@@ -248,7 +252,7 @@ public class RlGameManager {
      *
      * Returns a SimulationResult with the leaf observation and terminal info.
      */
-    public SimulationResult simulate(int firstActionIndex, int maxAgentDecisions) {
+    public SimulationResult simulate(int firstActionIndex, int maxAgentDecisions, boolean randomizeHidden) {
         if (currentGame == null || onnxEngine == null) {
             throw new IllegalStateException("No active game or ONNX engine for simulation");
         }
@@ -293,6 +297,11 @@ public class RlGameManager {
                 throw new IllegalStateException("Could not identify sim players");
             }
 
+            // ISMCTS: randomize opponent's hidden information before simulation
+            if (randomizeHidden) {
+                determinizeHiddenInfo(simGame, simOpponent);
+            }
+
             // Inject the first action: the agent's controller will use this
             // on its first queryAgent call instead of running inference
             MctsSimulationController agentCtrl =
@@ -331,6 +340,30 @@ public class RlGameManager {
             Observation fallbackObs = observationBuilder.buildObservation(currentGame, agentPlayer, opponentPlayer);
             return new SimulationResult(fallbackObs, false, 0f, 0);
         }
+    }
+
+    /**
+     * ISMCTS determinization: shuffle opponent's hand into their library and redeal.
+     * This removes the agent's ability to "see" the opponent's hand during simulation.
+     */
+    private void determinizeHiddenInfo(Game simGame, Player simOpponent) {
+        Zone hand = simOpponent.getZone(ZoneType.Hand);
+        Zone library = simOpponent.getZone(ZoneType.Library);
+
+        int handSize = hand.size();
+        if (handSize == 0) return;
+
+        // Combine hand + library into a single pool
+        List<Card> pool = new ArrayList<>();
+        for (Card c : hand.getCards()) pool.add(c);
+        for (Card c : library.getCards()) pool.add(c);
+
+        // Shuffle the pool
+        Collections.shuffle(pool, MyRandom.getRandom());
+
+        // Redistribute: first handSize cards go to hand, rest to library
+        hand.setCards(pool.subList(0, handSize));
+        library.setCards(pool.subList(handSize, pool.size()));
     }
 
     /**

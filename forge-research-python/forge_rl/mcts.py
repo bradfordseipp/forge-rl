@@ -1,7 +1,11 @@
-"""MCTS inference layer using a trained policy/value network.
+"""MCTS / ISMCTS inference layer using a trained policy/value network.
 
 Wraps a PPO-trained Agent to guide Monte Carlo Tree Search at inference time.
 Uses the Forge gRPC Simulate RPC to run forward simulations on cloned games.
+
+Supports Information Set MCTS (ISMCTS) via use_ismcts=True (default), which
+randomizes the opponent's hand before each simulation to prevent the search
+from exploiting hidden information.
 """
 
 from __future__ import annotations
@@ -66,6 +70,7 @@ class MCTSAgent:
         max_sim_depth: int = 3,
         dirichlet_alpha: float = 0.3,
         dirichlet_epsilon: float = 0.25,
+        use_ismcts: bool = True,
     ):
         self.agent = agent
         self.device = device
@@ -74,6 +79,7 @@ class MCTSAgent:
         self.max_sim_depth = max_sim_depth
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
+        self.use_ismcts = use_ismcts
 
         self.agent.eval()
 
@@ -198,6 +204,7 @@ class MCTSAgent:
                     sim_result = client.simulate(
                         first_action_index=best_action,
                         max_agent_decisions=self.max_sim_depth,
+                        randomize_hidden=self.use_ismcts,
                     )
 
                     if sim_result.game_ended:

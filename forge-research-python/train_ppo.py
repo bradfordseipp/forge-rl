@@ -103,18 +103,18 @@ CARD_ZONES = [
     "agent_graveyard", "opponent_graveyard",
     "agent_exile", "opponent_exile",
 ]
-CARD_FEATURES = 38  # 12 scalar + 5 colors + 7 types + 14 keywords
+CARD_FEATURES = 39  # 12 scalar + 5 colors + 7 types + 14 keywords + 1 playable_from_exile
 STACK_FEATURES = 6  # source_name_id, controller, target_name_id, target_is_player, target_is_own, source_type
 # Zone sizes (must match env.py)
 ZONE_SIZES = {"agent_hand": 10, "agent_battlefield": 20, "opponent_battlefield": 20,
               "agent_graveyard": 15, "opponent_graveyard": 15, "agent_exile": 10, "opponent_exile": 10}
 TOTAL_CARD_SLOTS = sum(ZONE_SIZES.values())  # 100
 CARD_VOCAB_SIZE = 4096  # max unique card names (name_id 0 reserved for padding)
-CARD_EMBED_DIM = 64     # learned embedding dimension per card name
+CARD_EMBED_DIM = 128    # learned embedding dimension per card name
 MAX_STACK = 10
 NUM_ZONES = len(CARD_ZONES)  # 7
 NUM_TOKEN_TYPES = NUM_ZONES + 1  # 7 card zones + 1 stack zone
-CARD_TOKEN_DIM = 64     # per-card/stack token dimension fed into attention
+CARD_TOKEN_DIM = 128    # per-card/stack token dimension fed into attention
 ATTN_HEADS = 4
 ATTN_LAYERS = 2
 
@@ -130,9 +130,11 @@ class Agent(nn.Module):
         super().__init__()
 
         # Scalar encoder: game_info(6) + agent_scalars(11) + opponent_scalars(11) + decision_type(15) = 43
-        scalar_dim = 64
+        scalar_dim = 128
         self.scalar_encoder = nn.Sequential(
-            layer_init(nn.Linear(43, scalar_dim)),
+            layer_init(nn.Linear(43, 256)),
+            nn.ReLU(),
+            layer_init(nn.Linear(256, scalar_dim)),
             nn.ReLU(),
         )
 
@@ -143,7 +145,7 @@ class Agent(nn.Module):
         self.token_type_embedding = nn.Embedding(NUM_TOKEN_TYPES, CARD_TOKEN_DIM)
 
         # Card projection: raw features → token dim for attention
-        card_input_dim = CARD_EMBED_DIM + CARD_FEATURES - 1  # 64 + 37 = 101
+        card_input_dim = CARD_EMBED_DIM + CARD_FEATURES - 1  # 128 + 38 = 166
         self.card_proj = nn.Sequential(
             layer_init(nn.Linear(card_input_dim, CARD_TOKEN_DIM)),
             nn.ReLU(),
@@ -173,7 +175,7 @@ class Agent(nn.Module):
 
         # --- Actor: actions cross-attend to card tokens ---
         # Action projection: raw action features → same dim as card tokens
-        action_proj_input = 2 * CARD_EMBED_DIM + 32  # src_emb(64) + tgt_emb(64) + 32 other = 160
+        action_proj_input = 2 * CARD_EMBED_DIM + 33  # src_emb(128) + tgt_emb(128) + 33 other = 289
         self.action_proj = nn.Sequential(
             layer_init(nn.Linear(action_proj_input, CARD_TOKEN_DIM)),
             nn.ReLU(),
@@ -188,11 +190,11 @@ class Agent(nn.Module):
         )
         self.action_cross_attn_norm = nn.LayerNorm(CARD_TOKEN_DIM)
 
-        # Action scoring head: cross_attn_output(64) + scalar(64) = 128 → 1
+        # Action scoring head: cross_attn_output(128) + scalar(128) = 256 → 1
         self.action_score = nn.Sequential(
-            layer_init(nn.Linear(CARD_TOKEN_DIM + scalar_dim, 128)),
+            layer_init(nn.Linear(CARD_TOKEN_DIM + scalar_dim, 256)),
             nn.ReLU(),
-            layer_init(nn.Linear(128, 1), std=0.01),
+            layer_init(nn.Linear(256, 1), std=0.01),
         )
 
         # --- Critic: learned query cross-attends to card tokens → value ---
@@ -206,14 +208,14 @@ class Agent(nn.Module):
         )
         self.value_cross_attn_norm = nn.LayerNorm(CARD_TOKEN_DIM)
 
-        # Value head: cross_attn_output(64) + scalar(64) = 128
+        # Value head: cross_attn_output(128) + scalar(128) = 256
         self.critic_trunk = nn.Sequential(
-            layer_init(nn.Linear(CARD_TOKEN_DIM + scalar_dim, 256)),
+            layer_init(nn.Linear(CARD_TOKEN_DIM + scalar_dim, 512)),
             nn.ReLU(),
-            layer_init(nn.Linear(256, 128)),
+            layer_init(nn.Linear(512, 256)),
             nn.ReLU(),
         )
-        self.critic = layer_init(nn.Linear(128, 1), std=1.0)
+        self.critic = layer_init(nn.Linear(256, 1), std=1.0)
 
     def _tokenize_board(self, obs: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Build card + stack tokens with type embeddings and stack positional encoding.
@@ -300,10 +302,10 @@ class Agent(nn.Module):
 
     def _encode_board(self, obs: dict[str, torch.Tensor]):
         """Encode the full board state. Returns scalar_enc, board_tokens, board_mask."""
-        scalar_enc = self.scalar_encoder(self._normalize_scalars(obs))  # (B, 64)
+        scalar_enc = self.scalar_encoder(self._normalize_scalars(obs))  # (B, 128)
 
         # Unified card + stack tokens through shared transformer
-        board_tokens, board_mask = self._tokenize_board(obs)  # (B, 110, 64), (B, 110)
+        board_tokens, board_mask = self._tokenize_board(obs)  # (B, 110, 128), (B, 110)
         board_tokens = self.card_transformer(board_tokens, src_key_padding_mask=board_mask)
 
         return scalar_enc, board_tokens, board_mask
@@ -311,18 +313,18 @@ class Agent(nn.Module):
     def _encode_actions(self, action_features: torch.Tensor) -> torch.Tensor:
         """Encode raw action features into action tokens.
 
-        action_features: (B, 256, 34) where indices 0 and 4 are raw name_ids.
+        action_features: (B, 256, 35) where indices 0 and 4 are raw name_ids.
         Returns: (B, 256, CARD_TOKEN_DIM) action tokens.
         """
         af = action_features.float()
         src_name_ids = af[:, :, 0].long().clamp(min=0, max=CARD_VOCAB_SIZE - 1)
         tgt_name_ids = af[:, :, 4].long().clamp(min=0, max=CARD_VOCAB_SIZE - 1)
-        src_emb = self.card_name_embedding(src_name_ids)  # (B, 256, 64)
-        tgt_emb = self.card_name_embedding(tgt_name_ids)  # (B, 256, 64)
+        src_emb = self.card_name_embedding(src_name_ids)  # (B, 256, 128)
+        tgt_emb = self.card_name_embedding(tgt_name_ids)  # (B, 256, 128)
 
-        other = torch.cat([af[:, :, 1:4], af[:, :, 5:7], af[:, :, 7:34]], dim=-1)  # (B, 256, 32)
+        other = torch.cat([af[:, :, 1:4], af[:, :, 5:7], af[:, :, 7:35]], dim=-1)  # (B, 256, 33)
 
-        combined = torch.cat([src_emb, other, tgt_emb], dim=-1)  # (B, 256, 160)
+        combined = torch.cat([src_emb, other, tgt_emb], dim=-1)  # (B, 256, 289)
         return self.action_proj(combined)  # (B, 256, 64)
 
     def _compute_value(self, scalar_enc, board_tokens, board_mask):
@@ -418,6 +420,155 @@ DT_MULLIGAN = 4
 CARD_IDX_NAME_ID = 0
 CARD_IDX_CMC = 3
 CARD_IDX_IS_LAND = 17  # unpacked from type_bitmask
+
+
+def _java_string_hash(s: str) -> int:
+    """Replicate Java's String.hashCode()."""
+    h = 0
+    for c in s:
+        h = (31 * h + ord(c)) & 0xFFFFFFFF
+    return h
+
+
+def card_name_to_id(name: str, vocab_size: int = 4096) -> int:
+    """Replicate CardRegistry.getNameId() from Java."""
+    h = _java_string_hash(name) & 0x7FFFFFFF
+    return 1 + (h % (vocab_size - 1))
+
+
+def parse_deck_card_names(deck_path: str) -> dict[int, str]:
+    """Parse a .dck file and return {name_id: card_name} for non-land cards."""
+    # Resolve relative paths against forge-research dir (same as server startup)
+    if not os.path.isfile(deck_path):
+        forge_research_dir = str(Path(__file__).resolve().parent.parent / "forge-research")
+        resolved = os.path.join(forge_research_dir, deck_path)
+        if os.path.isfile(resolved):
+            deck_path = resolved
+    id_to_name = {}
+    in_main = False
+    with open(deck_path) as f:
+        for line in f:
+            line = line.strip()
+            if line == "[Main]":
+                in_main = True
+                continue
+            if line.startswith("[") and line.endswith("]"):
+                in_main = False
+                continue
+            if not in_main or not line:
+                continue
+            # Format: "4 Card Name"
+            parts = line.split(" ", 1)
+            if len(parts) == 2:
+                card_name = parts[1]
+                if card_name == "Mountain":
+                    continue
+                nid = card_name_to_id(card_name)
+                id_to_name[nid] = card_name
+    return id_to_name
+
+
+class CardWinRateTracker:
+    """Tracks per-card win rate stats (17lands style) during training.
+
+    For each non-land card in the deck, tracks:
+      - OH WR: Opening Hand Win Rate (win rate when card is in opening hand)
+      - GIH WR: Game In Hand Win Rate (win rate when card was ever in hand)
+      - GND WR: Game Not Drawn Win Rate (win rate when card was never in hand)
+      - IWD: Improvement When Drawn (GIH WR - GND WR)
+    """
+
+    def __init__(self, deck_path: str):
+        self.id_to_name = parse_deck_card_names(deck_path)
+        self.tracked_ids = set(self.id_to_name.keys())
+
+        # Per-card counters: {name_id: [games, wins]}
+        self.opening_hand = {nid: [0, 0] for nid in self.tracked_ids}  # OH
+        self.game_in_hand = {nid: [0, 0] for nid in self.tracked_ids}  # GIH
+        self.game_not_drawn = {nid: [0, 0] for nid in self.tracked_ids}  # GND
+
+        # Per-env state tracking
+        self.env_opening_hand: dict[int, set[int]] = {}  # env_i -> set of name_ids
+        self.env_ever_in_hand: dict[int, set[int]] = {}  # env_i -> set of name_ids
+        self.env_game_started: dict[int, bool] = {}       # env_i -> past mulligan phase
+
+    def init_envs(self, num_envs: int):
+        """Initialize per-env tracking."""
+        for i in range(num_envs):
+            self._reset_env(i)
+
+    def _reset_env(self, env_i: int):
+        self.env_opening_hand[env_i] = set()
+        self.env_ever_in_hand[env_i] = set()
+        self.env_game_started[env_i] = False
+
+    def observe_step(self, env_i: int, hand_obs: np.ndarray, decision_type: int):
+        """Called each step to track which cards are/were in hand.
+
+        Args:
+            hand_obs: (MAX_HAND, CARD_FEATURES) array for this env
+            decision_type: current decision type index
+        """
+        # Extract name_ids of occupied hand slots
+        name_ids = set()
+        for slot in range(hand_obs.shape[0]):
+            nid = int(hand_obs[slot, CARD_IDX_NAME_ID])
+            if nid > 0 and nid in self.tracked_ids:
+                name_ids.add(nid)
+
+        # Track ever-in-hand across the whole game
+        self.env_ever_in_hand[env_i].update(name_ids)
+
+        # Capture opening hand: first non-mulligan decision
+        if not self.env_game_started[env_i] and decision_type != DT_MULLIGAN:
+            self.env_opening_hand[env_i] = name_ids.copy()
+            self.env_game_started[env_i] = True
+
+    def record_game_end(self, env_i: int, won: bool):
+        """Called when a game ends. Credits cards and resets env tracking."""
+        opening = self.env_opening_hand[env_i]
+        ever_seen = self.env_ever_in_hand[env_i]
+        w = 1 if won else 0
+
+        for nid in self.tracked_ids:
+            if nid in opening:
+                self.opening_hand[nid][0] += 1
+                self.opening_hand[nid][1] += w
+            if nid in ever_seen:
+                self.game_in_hand[nid][0] += 1
+                self.game_in_hand[nid][1] += w
+            else:
+                self.game_not_drawn[nid][0] += 1
+                self.game_not_drawn[nid][1] += w
+
+        self._reset_env(env_i)
+
+    def log_to_tensorboard(self, writer, global_step: int, min_games: int = 100):
+        """Log per-card stats to TensorBoard."""
+        for nid in self.tracked_ids:
+            name = self.id_to_name[nid]
+            # Sanitize name for TensorBoard tag
+            safe_name = name.replace("'", "").replace(" ", "_")
+
+            oh_games, oh_wins = self.opening_hand[nid]
+            gih_games, gih_wins = self.game_in_hand[nid]
+            gnd_games, gnd_wins = self.game_not_drawn[nid]
+
+            if oh_games >= min_games:
+                oh_wr = oh_wins / oh_games
+                writer.add_scalar(f"card_stats/{safe_name}/OH_WR", oh_wr, global_step)
+
+            if gih_games >= min_games:
+                gih_wr = gih_wins / gih_games
+                writer.add_scalar(f"card_stats/{safe_name}/GIH_WR", gih_wr, global_step)
+
+            if gnd_games >= min_games:
+                gnd_wr = gnd_wins / gnd_games
+                writer.add_scalar(f"card_stats/{safe_name}/GND_WR", gnd_wr, global_step)
+
+            if gih_games >= min_games and gnd_games >= min_games:
+                iwd = (gih_wins / gih_games) - (gnd_wins / gnd_games)
+                writer.add_scalar(f"card_stats/{safe_name}/IWD", iwd, global_step)
 
 
 def obs_to_tensor(obs: dict[str, np.ndarray], device: torch.device) -> dict[str, torch.Tensor]:
@@ -792,12 +943,17 @@ def main():
     recent_opp_life = deque(maxlen=1000)
     recent_ep_lengths = deque(maxlen=1000)
 
+    # Card win rate tracking (17lands style)
+    card_tracker = CardWinRateTracker(args.deck_a)
+    card_tracker.init_envs(args.num_envs)
+
     # Decision type & mulligan tracking (reset each update)
     decision_type_counts = Counter()
     mulligan_events = []  # [(land_count, action_taken, mulligan_count), ...]
 
     print(f"Starting training: {num_updates} updates, {args.batch_size} batch size")
     start_time = time.time()
+    sps_start_step = global_step  # for accurate SPS on resumed runs
 
     for update in range(start_update, num_updates + 1):
         # Anneal learning rate
@@ -824,10 +980,11 @@ def main():
             actions[step] = action
             logprobs[step] = logprob
 
-            # Track decision types and mulligan quality
+            # Track decision types, mulligan quality, and per-card stats
             for env_i in range(args.num_envs):
                 dt = int(next_obs["decision_type"][env_i].argmax())
                 decision_type_counts[dt] += 1
+                card_tracker.observe_step(env_i, next_obs["agent_hand"][env_i], dt)
 
                 if dt == DT_MULLIGAN:
                     hand = next_obs["agent_hand"][env_i]  # (MAX_HAND, CARD_FEATURES)
@@ -863,6 +1020,7 @@ def main():
                         if won:
                             win_count += 1
                         recent_wins.append(1 if won else 0)
+                        card_tracker.record_game_end(i, won)
 
                         recent_ep_lengths.append(ep_length)
                         writer.add_scalar("charts/episodic_return", ep_return, global_step)
@@ -962,7 +1120,7 @@ def main():
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
-        sps = int(global_step / (time.time() - start_time))
+        sps = int((global_step - sps_start_step) / (time.time() - start_time))
         win_rate = win_count / max(episode_count, 1)
 
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
@@ -1027,6 +1185,10 @@ def main():
         decision_type_counts.clear()
         mulligan_events.clear()
 
+        # Log per-card win rate stats every 50 updates
+        if update % 50 == 0:
+            card_tracker.log_to_tensorboard(writer, global_step, min_games=100)
+
         if update % 10 == 0 or update == 1:
             avg_return = np.mean(recent_returns) if recent_returns else 0.0
             print(
@@ -1065,11 +1227,12 @@ def main():
 
     # Save final model
     run_dir = f"runs/{args.run_name}"
+    final_update = update if 'update' in dir() else start_update - 1
     final_data = {
         "model_state_dict": agent.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "global_step": global_step,
-        "update": update,
+        "update": final_update,
         "episode_count": episode_count,
         "win_count": win_count,
     }

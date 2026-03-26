@@ -20,12 +20,12 @@ MAX_STACK = 10
 NUM_COLOR_BITS = 5       # W, U, B, R, G
 NUM_TYPE_BITS = 7        # Creature, Land, Instant, Sorcery, Enchantment, Artifact, Planeswalker
 NUM_KEYWORD_BITS = 14    # flying, first_strike, ..., flash
-# 12 scalar features + 5 colors + 7 types + 14 keywords = 38
-CARD_FEATURES = 38
+# 12 scalar features + 5 colors + 7 types + 14 keywords + 1 playable_from_exile = 39
+CARD_FEATURES = 39
 STACK_FEATURES = 6      # source_name_id, controller, target_name_id, target_is_player, target_is_own, source_type
 MAX_ACTIONS = 256
 NUM_DECISION_TYPES = 15
-ACTION_FEATURES = 34    # 20 original + 14 source keyword bits
+ACTION_FEATURES = 35    # 20 original + 14 source keyword bits + 1 source_from_exile
 
 # Card feature layout (after bitmask unpacking):
 #  0: name_id, 1: power, 2: toughness, 3: cmc,
@@ -39,6 +39,7 @@ ACTION_FEATURES = 34    # 20 original + 14 source keyword bits
 #         has_trample, has_haste, has_reach, has_vigilance, has_menace,
 #         has_defender, has_hexproof, has_indestructible, has_flash,
 #  37: plus_one_counter_count
+#  38: is_playable_from_exile (1 if card is in exile and can be played this turn)
 #
 # Dropped (redundant/not learnable): card_id, keyword_count, controller_index, owner_index
 
@@ -185,7 +186,7 @@ class ForgeRlEnv(gym.Env):
                 decision_type[dt] = 1
         result["decision_type"] = decision_type
 
-        # Per-action features (34 total):
+        # Per-action features (35 total):
         #   0: source_name_id (embedded), 1: log_card_id, 2: is_pass,
         #   3: target_is_player, 4: target_name_id (embedded), 5: log_target_card_id,
         #   6: target_is_own,
@@ -198,6 +199,7 @@ class ForgeRlEnv(gym.Env):
         #   20-33: source keyword bits (flying, first_strike, double_strike, deathtouch,
         #          lifelink, trample, haste, reach, vigilance, menace, defender,
         #          hexproof, indestructible, flash)
+        #   34: source_from_exile (1.0 if source card is in exile zone)
         action_features = np.zeros((MAX_ACTIONS, ACTION_FEATURES), dtype=np.float32)
         if decision_point and decision_point.legal_actions:
             for action in decision_point.legal_actions:
@@ -235,6 +237,8 @@ class ForgeRlEnv(gym.Env):
                         (kw_bm >> 6) & 1, (kw_bm >> 7) & 1, (kw_bm >> 8) & 1,
                         (kw_bm >> 9) & 1, (kw_bm >> 10) & 1, (kw_bm >> 11) & 1,
                         (kw_bm >> 12) & 1, (kw_bm >> 13) & 1,
+                        # Source zone (1.0 if from exile, 0.0 otherwise)
+                        1.0 if (hasattr(action, 'source_zone') and action.source_zone == 3) else 0.0,
                     ]
         result["action_features"] = action_features
 
@@ -289,6 +293,7 @@ class ForgeRlEnv(gym.Env):
                 (kw >> 8) & 1, (kw >> 9) & 1, (kw >> 10) & 1, (kw >> 11) & 1,
                 (kw >> 12) & 1, (kw >> 13) & 1,
                 card.plus_one_counter_count / 10.0,
+                int(card.is_playable_from_exile) if hasattr(card, 'is_playable_from_exile') else 0,
             ]
         return mat
 

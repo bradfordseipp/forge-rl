@@ -352,13 +352,15 @@ def run_eval(args):
         print(f"{'='*60}")
 
         if budget == 0:
-            mcts_agent = MCTSAgent(agent, device=device, num_simulations=1, c_puct=0)
+            mcts_agent = MCTSAgent(agent, device=device, num_simulations=1, c_puct=0,
+                                   use_ismcts=False)
         else:
             mcts_agent = MCTSAgent(
                 agent, device=device,
                 num_simulations=budget,
                 c_puct=args.c_puct,
                 max_sim_depth=args.sim_depth,
+                use_ismcts=not args.perfect_info,
             )
 
         game_stats = []
@@ -485,6 +487,8 @@ def main():
     parser.add_argument("--port", type=int, default=50099, help="Server port (avoid training ports)")
     parser.add_argument("--seed", type=int, default=1000, help="Base seed for games")
     parser.add_argument("--output", type=str, default="", help="Output JSON path")
+    parser.add_argument("--perfect-info", action="store_true",
+                        help="Use perfect-info MCTS instead of ISMCTS (default: ISMCTS)")
     args = parser.parse_args()
     run_eval(args)
 

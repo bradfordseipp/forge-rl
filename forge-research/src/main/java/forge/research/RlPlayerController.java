@@ -130,6 +130,14 @@ public class RlPlayerController extends PlayerControllerAi {
                 .setPlayerIndex(playerIndex);
     }
 
+    private static int zoneToInt(Card c) {
+        if (c.isInZone(ZoneType.Hand))        return 0;
+        if (c.isInZone(ZoneType.Battlefield)) return 1;
+        if (c.isInZone(ZoneType.Graveyard))   return 2;
+        if (c.isInZone(ZoneType.Exile))        return 3;
+        return -1;
+    }
+
     private boolean isOwnEntity(GameEntity entity) {
         if (entity instanceof Card) {
             return ((Card) entity).getController() == player;
@@ -163,6 +171,7 @@ public class RlPlayerController extends PlayerControllerAi {
             opt.setSourceCmc(source.getCMC());
             opt.setSourceTypeBitmask(ObservationBuilder.computeTypeBitmask(source));
             opt.setSourceKeywordBitmask(ObservationBuilder.computeKeywordBitmask(source));
+            opt.setSourceZone(zoneToInt(source));
         }
         if (target != null) {
             if (target instanceof Card) {
